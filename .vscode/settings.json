@@ -1,0 +1,15 @@
+{
+    "C_Cpp.intelliSenseEngine": "default",
+    "idf.espIdfPathWin": "C:\\Users\\Hendrik Quintelier\\esp\\v5.4\\esp-idf",
+    "idf.openOcdConfigs": [
+        "board/esp32s3-builtin.cfg"
+    ],
+    "idf.portWin": "COM5",
+    "idf.toolsPathWin": "c:\\Workspace\\.espressif",
+    "idf.flashType": "JTAG",
+    "files.associations": {
+        "mappoint.h": "c",
+        "dijkstra.h": "c",
+        "fundamentalpath.h": "c"
+    }
+}

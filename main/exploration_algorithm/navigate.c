@@ -50,8 +50,8 @@ void navigate_path(const Path *p)
         // Move forward along the path
         for (int j = 0; j < step->distance; j++)
         {
-            move_forward();
-            print_grid(); // Visualize movement on the grid
+            move_forward(); // ERROR bcs doesn't exist
+            print_grid();   // Visualize movement on the grid
         }
 
         // Update the car's position after completing the movement

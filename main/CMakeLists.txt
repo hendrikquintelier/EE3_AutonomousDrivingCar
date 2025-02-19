@@ -1,2 +1,2 @@
-idf_component_register(SRCS "blink_example_main.c"
+idf_component_register(SRCS "sensordata_logging/ultrasonic.c"
                        INCLUDE_DIRS ".")

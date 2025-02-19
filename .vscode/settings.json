@@ -6,7 +6,7 @@
     ],
     "idf.portWin": "COM5",
     "idf.toolsPathWin": "c:\\Workspace\\.espressif",
-    "idf.flashType": "JTAG",
+    "idf.flashType": "UART",
     "files.associations": {
         "mappoint.h": "c",
         "dijkstra.h": "c",

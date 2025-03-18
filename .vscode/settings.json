@@ -10,6 +10,7 @@
     "files.associations": {
         "mappoint.h": "c",
         "dijkstra.h": "c",
-        "fundamentalpath.h": "c"
+        "fundamentalpath.h": "c",
+        "gpio.h": "c"
     }
 }

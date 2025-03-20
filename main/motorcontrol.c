@@ -6,6 +6,7 @@
 #include "wifi_logger.h"
 #include <stdio.h>
 #include <math.h>
+#include <stdbool.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -49,7 +50,33 @@ static float desired_heading = 0.0f;
 // Tuning Constants
 // -----------------------------------------------------
 #define BRAKE_K 50      // Proportional gain for braking
-#define HEADING_K 0.05f // Simple heading correction gain
+#define HEADING_K 0.01f // Reduced from 0.05f for gentler heading correction
+
+// -----------------------------------------------------
+// PID Control Constants
+// -----------------------------------------------------
+#define HEADING_KP 0.05f           // Increased from 0.005f for stronger immediate response
+#define HEADING_KI 0.0005f         // Increased from 0.0001f for better steady-state correction
+#define HEADING_KD 0.004f          // Increased from 0.001f for better damping
+#define HEADING_I_MAX 0.1f         // Increased from 0.05f to allow more integral correction
+#define MIN_SPEED_FOR_HEADING 0.1f // Minimum speed before applying heading corrections
+
+// -----------------------------------------------------
+// PID State Variables
+// -----------------------------------------------------
+static float heading_integral = 0.0f;
+static float last_heading_error = 0.0f;
+static uint32_t last_heading_update = 0;
+
+// -----------------------------------------------------
+// Additional static variables
+// -----------------------------------------------------
+static bool is_braking_state = false;
+static float current_speed_value = 0.0f;
+static float last_left_speed = 0.0f;
+static float last_right_speed = 0.0f;
+static const float MAX_SPEED_CHANGE = 0.1f; // Maximum speed change per iteration
+static bool first_run = true;
 
 // -----------------------------------------------------
 // Initialize the motor driver
@@ -145,42 +172,13 @@ void motor_set_desired_heading(float heading)
 }
 
 // -----------------------------------------------------
-// Drive straight with heading hold
+// Drive straight with enhanced heading hold
 // -----------------------------------------------------
 void motor_drive_straight(float speed)
 {
-    static uint32_t last_boost_time = 0;
-    static bool boost_done = false;
+    current_speed_value = speed;
+    is_braking_state = false;
     uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-
-    // If this is the first call or we haven't done the boost yet
-    if (!boost_done)
-    {
-        my_wifi_log("Applying startup boost...\n");
-
-        // Set direction pins for forward (both motors):
-        gpio_set_level(INPUT1_PIN, 1); // Motor A forward
-        gpio_set_level(INPUT2_PIN, 0);
-        gpio_set_level(INPUT3_PIN, 1); // Motor B forward
-        gpio_set_level(INPUT4_PIN, 0);
-
-        // Set full speed for boost
-        uint32_t boost_duty = LEDC_MAX_DUTY;
-        ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, boost_duty);
-        ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
-        ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, boost_duty);
-        ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
-
-        // Wait for boost duration
-        vTaskDelay(pdMS_TO_TICKS(250));
-
-        // Mark boost as done
-        boost_done = true;
-        last_boost_time = current_time;
-    }
-
-    // After boost, maintain constant speed
-    my_wifi_log("Setting motor speed to %.2f\n", speed);
 
     // 1. Read the current orientation
     mpu_data_t mpu_data = mpu_get_orientation();
@@ -188,51 +186,118 @@ void motor_drive_straight(float speed)
 
     // 2. Compute heading error relative to desired_heading
     float error = desired_heading - current_heading;
-    // Normalize error to -180..+180
-    while (error > 180.0f)
+
+    // Normalize error to -180..+180 with improved handling of 360° wrap-around
+    if (error > 180.0f)
+    {
         error -= 360.0f;
-    while (error < -180.0f)
+    }
+    else if (error < -180.0f)
+    {
         error += 360.0f;
+    }
 
-    // 3. Apply a simple P-controller to get a correction
-    float correction = HEADING_K * error;
+    // On first run, set the desired heading to match current heading
+    if (first_run)
+    {
+        desired_heading = current_heading;
+        error = 0.0f;
+        first_run = false;
+        my_wifi_log("Initial heading set to %.2f°\n", current_heading);
+    }
 
-    // 4. Convert to left/right speeds
-    float left_speed = speed + correction;
-    float right_speed = speed - correction;
+    // 3. Calculate time delta for integral and derivative terms
+    float dt = (current_time - last_heading_update) / 1000.0f; // Convert to seconds
+    if (dt > 0.1f)
+        dt = 0.1f; // Cap at 100ms
+    last_heading_update = current_time;
 
-    // 5. Clamp speeds to [0..1]
+    // 4. Update integral term with anti-windup and deadband
+    if (speed > MIN_SPEED_FOR_HEADING)
+    {
+        heading_integral += error * dt;
+        if (heading_integral > HEADING_I_MAX)
+            heading_integral = HEADING_I_MAX;
+        if (heading_integral < -HEADING_I_MAX)
+            heading_integral = -HEADING_I_MAX;
+    }
+
+    // 5. Calculate derivative term with low-pass filtering
+    float derivative = (error - last_heading_error) / dt;
+    last_heading_error = error;
+
+    // 6. Apply PID control with speed-based scaling
+    float correction = 0.0f;
+    if (speed > MIN_SPEED_FOR_HEADING)
+    {
+        // Scale correction based on error magnitude for more aggressive correction of larger errors
+        float error_scale = fabsf(error) / 180.0f;    // Normalize to 0-1
+        correction = (HEADING_KP * error +            // Proportional term
+                      HEADING_KI * heading_integral + // Integral term
+                      HEADING_KD * derivative) *      // Derivative term
+                     (speed / 0.6f) *                 // Scale by current speed
+                     (0.5f + 0.5f * error_scale);     // More aggressive for larger errors
+    }
+
+    // 7. Convert to left/right speeds with improved scaling
+    float target_left_speed = speed + correction;
+    float target_right_speed = speed - correction;
+
+    // 8. Smoothly transition to target speeds
+    float left_speed = last_left_speed;
+    float right_speed = last_right_speed;
+
+    // Smoothly adjust speeds with reduced maximum change
+    if (target_left_speed > left_speed)
+        left_speed = fminf(left_speed + MAX_SPEED_CHANGE * 0.5f, target_left_speed);
+    else
+        left_speed = fmaxf(left_speed - MAX_SPEED_CHANGE * 0.5f, target_left_speed);
+
+    if (target_right_speed > right_speed)
+        right_speed = fminf(right_speed + MAX_SPEED_CHANGE * 0.5f, target_right_speed);
+    else
+        right_speed = fmaxf(right_speed - MAX_SPEED_CHANGE * 0.5f, target_right_speed);
+
+    // Store current speeds for next iteration
+    last_left_speed = left_speed;
+    last_right_speed = right_speed;
+
+    // 9. Clamp speeds to [0..1] with improved handling
     if (left_speed < 0)
+    {
+        right_speed += left_speed; // Transfer lost power to other wheel
         left_speed = 0;
+    }
+    if (right_speed < 0)
+    {
+        left_speed += right_speed; // Transfer lost power to other wheel
+        right_speed = 0;
+    }
     if (left_speed > 1.0)
         left_speed = 1.0;
-    if (right_speed < 0)
-        right_speed = 0;
     if (right_speed > 1.0)
         right_speed = 1.0;
 
-    // 6. Set direction pins for forward (both motors):
+    // 10. Set direction pins for forward (both motors):
     gpio_set_level(INPUT1_PIN, 1); // Motor A forward
     gpio_set_level(INPUT2_PIN, 0);
     gpio_set_level(INPUT3_PIN, 1); // Motor B forward
     gpio_set_level(INPUT4_PIN, 0);
 
-    // 7. Compute duty cycles from speeds
+    // 11. Compute duty cycles from speeds
     uint32_t left_duty = (uint32_t)(left_speed * LEDC_MAX_DUTY);
     uint32_t right_duty = (uint32_t)(right_speed * LEDC_MAX_DUTY);
 
-    my_wifi_log("Setting motor duties - Left: %lu, Right: %lu\n", left_duty, right_duty);
-
-    // 8. Update LEDC duty for each motor
+    // 12. Update LEDC duty for each motor
     ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, left_duty);
     ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
 
     ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, right_duty);
     ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
 
-    // Debug print
-    my_wifi_log("Heading=%.2f°, Error=%.2f => L=%.2f, R=%.2f\n",
-                current_heading, error, left_speed, right_speed);
+    // Debug print with enhanced information
+    my_wifi_log("Heading=%.2f°, Error=%.2f, I=%.2f, D=%.2f => L=%.2f, R=%.2f\n",
+                current_heading, error, heading_integral, derivative, left_speed, right_speed);
 }
 
 // -----------------------------------------------------
@@ -287,11 +352,12 @@ void motor_turn_by_angle(float angle, float speed)
 }
 
 // -----------------------------------------------------
-// Proportional brake: apply reverse torque based on wheel speed
+// Proportional brake: apply reverse torque based on wheel speed while maintaining heading
 // -----------------------------------------------------
 void motor_brake(void)
 {
-    my_wifi_log("Proportional braking: applying reverse torque based on wheel speed...\n");
+    is_braking_state = true;
+    my_wifi_log("Proportional braking: applying reverse torque while maintaining heading...\n");
 
     // 1. Set direction pins to reverse
     // Motor A: IN1=LOW, IN2=HIGH
@@ -311,7 +377,41 @@ void motor_brake(void)
 
     while (1)
     {
-        // Measure encoders
+        // Get current heading and calculate heading correction
+        mpu_data_t mpu_data = mpu_get_orientation();
+        float current_heading = mpu_data.yaw;
+        float error = desired_heading - current_heading;
+
+        // Normalize error to -180..+180
+        while (error > 180.0f)
+            error -= 360.0f;
+        while (error < -180.0f)
+            error += 360.0f;
+
+        // Calculate time delta for PID
+        uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        float dt = (current_time - last_heading_update) / 1000.0f;
+        if (dt > 0.1f)
+            dt = 0.1f;
+        last_heading_update = current_time;
+
+        // Update integral term with anti-windup
+        heading_integral += error * dt;
+        if (heading_integral > HEADING_I_MAX)
+            heading_integral = HEADING_I_MAX;
+        if (heading_integral < -HEADING_I_MAX)
+            heading_integral = -HEADING_I_MAX;
+
+        // Calculate derivative term
+        float derivative = (error - last_heading_error) / dt;
+        last_heading_error = error;
+
+        // Apply PID control for heading correction
+        float heading_correction = HEADING_KP * error +
+                                   HEADING_KI * heading_integral +
+                                   HEADING_KD * derivative;
+
+        // Measure encoders for speed-based braking
         int enc1_before = encoder_get_count(1);
         int enc2_before = encoder_get_count(2);
 
@@ -343,25 +443,95 @@ void motor_brake(void)
             break;
         }
 
-        // Calculate speed => duty
+        // Calculate base brake duty based on wheel speeds
         int speed1 = abs(delta1);
         int speed2 = abs(delta2);
 
-        uint32_t duty1 = BRAKE_K * speed1;
-        uint32_t duty2 = BRAKE_K * speed2;
+        uint32_t base_duty1 = BRAKE_K * speed1;
+        uint32_t base_duty2 = BRAKE_K * speed2;
+        if (base_duty1 > LEDC_MAX_DUTY)
+            base_duty1 = LEDC_MAX_DUTY;
+        if (base_duty2 > LEDC_MAX_DUTY)
+            base_duty2 = LEDC_MAX_DUTY;
+
+        // Apply heading correction to brake duties
+        float correction_factor = heading_correction * LEDC_MAX_DUTY;
+        int32_t duty1 = base_duty1 + (int32_t)correction_factor;
+        int32_t duty2 = base_duty2 - (int32_t)correction_factor;
+
+        // Clamp duties to valid range
+        if (duty1 < 0)
+            duty1 = 0;
+        if (duty2 < 0)
+            duty2 = 0;
         if (duty1 > LEDC_MAX_DUTY)
             duty1 = LEDC_MAX_DUTY;
         if (duty2 > LEDC_MAX_DUTY)
             duty2 = LEDC_MAX_DUTY;
 
-        // Update duty
+        // Update motor duties
         ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, duty1);
         ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
 
         ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, duty2);
         ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
 
-        my_wifi_log("Brake => speed1=%d, speed2=%d => duty1=%lu, duty2=%lu\n",
-                    speed1, speed2, (unsigned long)duty1, (unsigned long)duty2);
+        my_wifi_log("Brake => speed1=%d, speed2=%d, heading=%.2f°, error=%.2f => duty1=%ld, duty2=%ld\n",
+                    speed1, speed2, current_heading, error, duty1, duty2);
     }
+
+    // When braking is complete, reset the state
+    is_braking_state = false;
+}
+
+float motor_get_current_speed(void)
+{
+    // Get encoder readings
+    int enc1 = encoder_get_count(1);
+    int enc2 = encoder_get_count(2);
+
+    // Calculate average speed from both encoders
+    float avg_speed = (abs(enc1) + abs(enc2)) / 2.0f;
+
+    // Normalize to 0..1 range (assuming max encoder count of 1000)
+    float normalized_speed = avg_speed / 1000.0f;
+    if (normalized_speed > 1.0f)
+        normalized_speed = 1.0f;
+
+    current_speed_value = normalized_speed;
+    return normalized_speed;
+}
+
+float motor_get_current_heading(void)
+{
+    // Get current heading from MPU
+    mpu_data_t mpu_data = mpu_get_orientation();
+    return mpu_data.yaw;
+}
+
+bool motor_is_braking(void)
+{
+    return is_braking_state;
+}
+
+// Modify the motor_stop function to update states
+void motor_stop(void)
+{
+    current_speed_value = 0.0f;
+    is_braking_state = false;
+
+    // Set direction pins to stop
+    gpio_set_level(INPUT1_PIN, 0);
+    gpio_set_level(INPUT2_PIN, 0);
+    gpio_set_level(INPUT3_PIN, 0);
+    gpio_set_level(INPUT4_PIN, 0);
+
+    // Set duty cycles to 0
+    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, 0);
+    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
+
+    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, 0);
+    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
+
+    my_wifi_log("Motor stop complete.\n");
 }

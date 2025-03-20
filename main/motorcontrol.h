@@ -1,6 +1,8 @@
 #ifndef MOTORCONTROL_H
 #define MOTORCONTROL_H
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -43,6 +45,21 @@ extern "C"
      * @brief Move forward at half speed (basic function, no heading correction).
      */
     void motor_forward_half_speed(void);
+
+    /**
+     * @brief Get the current speed of the car (0..1).
+     */
+    float motor_get_current_speed(void);
+
+    /**
+     * @brief Get the current heading of the car in degrees.
+     */
+    float motor_get_current_heading(void);
+
+    /**
+     * @brief Check if the car is currently braking.
+     */
+    bool motor_is_braking(void);
 
 #ifdef __cplusplus
 }

@@ -4,17 +4,41 @@
 #include <stdio.h>
 #include <math.h>
 
-// Adjust these for your board's I2C
+// I2C pins from Excel
 #define I2C_MASTER_NUM I2C_NUM_0
-#define I2C_MASTER_SCL_IO 9
-#define I2C_MASTER_SDA_IO 8
-#define I2C_MASTER_FREQ_HZ 400000 // 400kHz if MPU6050 supports it
-#define MPU6050_I2C_ADDR 0x68     // AD0=GND => 0x68
+#define I2C_MASTER_SCL_IO 9 // SCL pin from Excel
+#define I2C_MASTER_SDA_IO 8 // SDA pin from Excel
+#define I2C_MASTER_FREQ_HZ 400000
+#define MPU6050_I2C_ADDR 0x68 // AD0=GND from Excel
 
-// Example register addresses for MPU6050
-#define MPU6050_REG_PWR_MGMT_1 0x6B
-#define MPU6050_REG_WHO_AM_I 0x75
-// ... plus registers for accelerometer/gyro data
+// MPU6050 Register Map
+#define PWR_MGMT_1 0x6B
+#define SMPLRT_DIV 0x19
+#define CONFIG 0x1A
+#define GYRO_CONFIG 0x1B
+#define ACCEL_CONFIG 0x1C
+#define ACCEL_XOUT_H 0x3B
+#define GYRO_XOUT_H 0x43
+#define WHO_AM_I 0x75
+
+// MPU6050 Configuration
+#define GYRO_FS_SEL 0x00  // ±250°/s
+#define ACCEL_FS_SEL 0x00 // ±2g
+#define DLPF_CONFIG 0x03  // 44Hz bandwidth for more stable readings
+
+// Sensor fusion parameters
+#define ALPHA 0.96f                // Complementary filter coefficient
+#define GYRO_SENSITIVITY 131.0f    // LSB/°/s for ±250°/s range
+#define ACCEL_SENSITIVITY 16384.0f // LSB/g for ±2g range
+#define CALIBRATION_SAMPLES 1000   // Number of samples for calibration
+#define GYRO_THRESHOLD 0.05f       // Minimum gyro reading to consider as motion
+
+// Global variables for sensor fusion
+static float gyro_x = 0, gyro_y = 0, gyro_z = 0;
+static float accel_x = 0, accel_y = 0, accel_z = 0;
+static float roll = 0, pitch = 0, yaw = 0;
+static uint32_t last_update = 0;
+static float gyro_bias_x = 0, gyro_bias_y = 0, gyro_bias_z = 0;
 
 static esp_err_t i2c_master_init(void)
 {
@@ -30,33 +54,190 @@ static esp_err_t i2c_master_init(void)
     return i2c_driver_install(I2C_MASTER_NUM, I2C_MODE_MASTER, 0, 0, 0);
 }
 
+static esp_err_t mpu_write_reg(uint8_t reg_addr, uint8_t data)
+{
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (MPU6050_I2C_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, reg_addr, true);
+    i2c_master_write_byte(cmd, data, true);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(100));
+    i2c_cmd_link_delete(cmd);
+    return ret;
+}
+
+static esp_err_t mpu_read_reg(uint8_t reg_addr, uint8_t *data)
+{
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (MPU6050_I2C_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, reg_addr, true);
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (MPU6050_I2C_ADDR << 1) | I2C_MASTER_READ, true);
+    i2c_master_read_byte(cmd, data, I2C_MASTER_LAST_NACK);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(100));
+    i2c_cmd_link_delete(cmd);
+    return ret;
+}
+
+static esp_err_t mpu_read_regs(uint8_t reg_addr, uint8_t *data, size_t len)
+{
+    if (len == 0)
+    {
+        return ESP_OK;
+    }
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (MPU6050_I2C_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, reg_addr, true);
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (MPU6050_I2C_ADDR << 1) | I2C_MASTER_READ, true);
+    if (len > 1)
+    {
+        i2c_master_read(cmd, data, len - 1, I2C_MASTER_ACK);
+    }
+    i2c_master_read_byte(cmd, data + len - 1, I2C_MASTER_LAST_NACK);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(100));
+    i2c_cmd_link_delete(cmd);
+    return ret;
+}
+
+static void calibrate_gyro(void)
+{
+    float sum_x = 0, sum_y = 0, sum_z = 0;
+    uint8_t data[6];
+
+    printf("Calibrating gyroscope - keep the sensor still...\n");
+
+    // Collect samples
+    for (int i = 0; i < CALIBRATION_SAMPLES; i++)
+    {
+        mpu_read_regs(GYRO_XOUT_H, data, 6);
+
+        sum_x += (int16_t)((data[0] << 8) | data[1]);
+        sum_y += (int16_t)((data[2] << 8) | data[3]);
+        sum_z += (int16_t)((data[4] << 8) | data[5]);
+
+        vTaskDelay(pdMS_TO_TICKS(2)); // 2ms delay between samples
+    }
+
+    // Calculate average bias
+    gyro_bias_x = sum_x / (CALIBRATION_SAMPLES * GYRO_SENSITIVITY);
+    gyro_bias_y = sum_y / (CALIBRATION_SAMPLES * GYRO_SENSITIVITY);
+    gyro_bias_z = sum_z / (CALIBRATION_SAMPLES * GYRO_SENSITIVITY);
+
+    printf("Gyro calibration complete. Bias: X=%.3f, Y=%.3f, Z=%.3f deg/s\n",
+           gyro_bias_x, gyro_bias_y, gyro_bias_z);
+}
+
 void mpu_init(void)
 {
     // Initialize I2C
     i2c_master_init();
 
     // Wake up MPU6050
-    // Write 0 to PWR_MGMT_1
-    uint8_t buf[2] = {MPU6050_REG_PWR_MGMT_1, 0x00};
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (MPU6050_I2C_ADDR << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write(cmd, buf, 2, true);
-    i2c_master_stop(cmd);
-    i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(100));
-    i2c_cmd_link_delete(cmd);
+    mpu_write_reg(PWR_MGMT_1, 0x00);
+    vTaskDelay(pdMS_TO_TICKS(100));
 
-    printf("MPU6050 initialized.\n");
+    // Configure MPU6050
+    mpu_write_reg(SMPLRT_DIV, 0x07);                // Sample rate divider: 1kHz / (1 + 7) = 125Hz
+    mpu_write_reg(CONFIG, DLPF_CONFIG);             // Digital low pass filter: 44Hz bandwidth
+    mpu_write_reg(GYRO_CONFIG, GYRO_FS_SEL << 3);   // Gyro full scale range: ±250°/s
+    mpu_write_reg(ACCEL_CONFIG, ACCEL_FS_SEL << 3); // Accel full scale range: ±2g
+
+    // Verify WHO_AM_I register
+    uint8_t who_am_i;
+    mpu_read_reg(WHO_AM_I, &who_am_i);
+    if (who_am_i != 0x68)
+    {
+        printf("MPU6050 initialization failed! WHO_AM_I = 0x%02X\n", who_am_i);
+        return;
+    }
+
+    printf("MPU6050 initialized successfully.\n");
+
+    // Perform gyroscope calibration
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Wait for sensor to stabilize
+    calibrate_gyro();
+}
+
+static void read_sensor_data(void)
+{
+    uint8_t data[14];
+
+    // Read accelerometer data
+    mpu_read_regs(ACCEL_XOUT_H, data, 6);
+    // Convert to match our orientation (Y=front, Z=up, X=side)
+    accel_x = (int16_t)((data[0] << 8) | data[1]) / ACCEL_SENSITIVITY; // Side acceleration
+    accel_y = (int16_t)((data[2] << 8) | data[3]) / ACCEL_SENSITIVITY; // Forward acceleration
+    accel_z = (int16_t)((data[4] << 8) | data[5]) / ACCEL_SENSITIVITY; // Vertical acceleration
+
+    // Read gyroscope data
+    mpu_read_regs(GYRO_XOUT_H, data + 6, 6);
+    // Convert and apply bias compensation, adjusting signs to match our orientation
+    float raw_gyro_x = (int16_t)((data[6] << 8) | data[7]) / GYRO_SENSITIVITY - gyro_bias_x;
+    float raw_gyro_y = (int16_t)((data[8] << 8) | data[9]) / GYRO_SENSITIVITY - gyro_bias_y;
+    float raw_gyro_z = (int16_t)((data[10] << 8) | data[11]) / GYRO_SENSITIVITY - gyro_bias_z;
+
+    // Map gyro axes to car's orientation
+    // For a right turn (clockwise), we should see a positive Z value
+    gyro_x = -raw_gyro_y; // Roll (around Y/front axis) - Negated to match car's orientation
+    gyro_y = raw_gyro_x;  // Pitch (around X/side axis)
+    gyro_z = raw_gyro_z;  // Yaw (around Z/up axis) - Positive for clockwise rotation
+
+    // Apply threshold to reduce noise
+    if (fabs(gyro_x) < GYRO_THRESHOLD)
+        gyro_x = 0;
+    if (fabs(gyro_y) < GYRO_THRESHOLD)
+        gyro_y = 0;
+    if (fabs(gyro_z) < GYRO_THRESHOLD)
+        gyro_z = 0;
+}
+
+static void update_orientation(void)
+{
+    uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    float dt = (current_time - last_update) / 1000.0f; // Convert to seconds
+    if (dt > 0.1f)
+        dt = 0.1f; // Cap at 100ms
+    last_update = current_time;
+
+    // Calculate angles based on our orientation (Y=front, Z=up, X=side)
+    // Roll (rotation around Y axis - forward axis)
+    float accel_roll = atan2f(accel_x, accel_z) * 180.0f / M_PI;
+
+    // Pitch (rotation around X axis - side axis)
+    float accel_pitch = atan2f(-accel_y, sqrtf(accel_x * accel_x + accel_z * accel_z)) * 180.0f / M_PI;
+
+    // Complementary filter for roll and pitch
+    roll = ALPHA * (roll + gyro_y * dt) + (1 - ALPHA) * accel_roll;
+    pitch = ALPHA * (pitch + gyro_x * dt) + (1 - ALPHA) * accel_pitch;
+
+    // Update yaw - positive is clockwise
+    yaw = yaw + gyro_z * dt;
+
+    // Normalize yaw to 0-360 degrees
+    while (yaw >= 360.0f)
+        yaw -= 360.0f;
+    while (yaw < 0.0f)
+        yaw += 360.0f;
 }
 
 mpu_data_t mpu_get_orientation(void)
 {
-    mpu_data_t data = {0};
-    // TODO: read gyro/accel registers from MPU6050,
-    // fuse them into a yaw/pitch/roll or heading.
-    // For example:
-    data.yaw = 0.0f;
-    data.pitch = 0.0f;
-    data.roll = 0.0f;
+    mpu_data_t data;
+
+    // Read and update sensor data
+    read_sensor_data();
+    update_orientation();
+
+    // Return the calculated orientation
+    data.roll = roll;
+    data.pitch = pitch;
+    data.yaw = yaw;
+
     return data;
 }

@@ -57,7 +57,7 @@ static float measure_distance(gpio_num_t trig_pin, gpio_num_t echo_pin)
     vTaskDelay(pdMS_TO_TICKS(0.01)); // 10µs
     gpio_set_level(trig_pin, 0);
 
-    // 2. Wait for ECHO to go HIGH 
+    // 2. Wait for ECHO to go HIGH
     wait_time = 0;
     while (gpio_get_level(echo_pin) == 0 && wait_time < max_wait_us)
     {

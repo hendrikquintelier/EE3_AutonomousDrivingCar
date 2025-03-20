@@ -19,14 +19,14 @@
 #include "esp_vfs_dev.h"
 
 #define OBSTACLE_DISTANCE_THRESHOLD 30.0f // 30cm threshold for obstacle detection
-#define BRAKE_START_DISTANCE 20.0f        // Start braking at 20cm
+#define BRAKE_START_DISTANCE 100.0f       // Start braking at 100cm (1 meter)
 #define BRAKE_STOP_DISTANCE 5.0f          // Stop at 5cm
 #define MIN_SPEED 0.1f                    // Minimum speed before stopping
 
 // WiFi configuration
 #define WIFI_SSID "Boenks"
 #define WIFI_PASSWORD "boenkie123"
-#define SERVER_IP "192.168.1.4" // Updated to match laptop's IP address
+#define SERVER_IP "192.168.39.87" // Updated to match laptop's new IP address
 #define SERVER_PORT 1234
 
 // UART configuration
@@ -242,8 +242,20 @@ void app_main(void)
 
     // Test motor movement first
     my_wifi_log("Testing motor movement...\n");
-    motor_drive_straight(0.6f);
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Run for 1 second
+
+    // Initial boost phase to overcome static friction
+    my_wifi_log("Starting boost phase...\n");
+
+    // Strong initial boost to overcome static friction
+    motor_drive_straight(1.0f);      // Start at 100% power
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Hold for 1 second at full power
+
+    // Gradually reduce to normal operating speed
+    motor_drive_straight(0.8f);     // Reduce to 80%
+    vTaskDelay(pdMS_TO_TICKS(500)); // Hold for 0.5 seconds
+    motor_drive_straight(0.6f);     // Finally reduce to normal speed
+    vTaskDelay(pdMS_TO_TICKS(500)); // Hold for 0.5 seconds
+
     motor_brake();
     my_wifi_log("Motor test complete.\n");
 
@@ -252,12 +264,33 @@ void app_main(void)
     {
         // Get ultrasonic readings
         ultrasonic_readings_t readings = ultrasonic_get_all();
-        my_wifi_log("Front distance: %.1f cm\n", readings.front);
+
+        // Get current motor states
+        float current_speed = motor_get_current_speed();
+        float current_heading = motor_get_current_heading();
+        bool is_braking = motor_is_braking();
+
+        // Log car state
+        if (is_braking)
+        {
+            my_wifi_log("Car State: BRAKING | Speed: %.2f | Heading: %.1f° | Distance: %.1f cm\n",
+                        current_speed, current_heading, readings.front);
+        }
+        else if (current_speed > 0.01f)
+        {
+            my_wifi_log("Car State: DRIVING | Speed: %.2f | Heading: %.1f° | Distance: %.1f cm\n",
+                        current_speed, current_heading, readings.front);
+        }
+        else
+        {
+            my_wifi_log("Car State: STOPPED | Speed: %.2f | Heading: %.1f° | Distance: %.1f cm\n",
+                        current_speed, current_heading, readings.front);
+        }
 
         // Progressive braking logic
         if (readings.front < BRAKE_START_DISTANCE)
         {
-            // Calculate speed based on distance
+            // Calculate speed based on distance with smoother transition
             float speed_factor = (readings.front - BRAKE_STOP_DISTANCE) / (BRAKE_START_DISTANCE - BRAKE_STOP_DISTANCE);
 
             // Clamp speed factor between 0 and 1
@@ -266,8 +299,9 @@ void app_main(void)
             if (speed_factor > 1)
                 speed_factor = 1;
 
-            // Calculate target speed (between MIN_SPEED and 0.6)
-            float target_speed = MIN_SPEED + (speed_factor * (0.6f - MIN_SPEED));
+            // Calculate target speed with smoother transition
+            // Start at 0.8 (80%) and gradually reduce to MIN_SPEED
+            float target_speed = MIN_SPEED + (speed_factor * (0.8f - MIN_SPEED));
 
             my_wifi_log("Progressive braking: distance=%.1f cm, speed_factor=%.2f, target_speed=%.2f\n",
                         readings.front, speed_factor, target_speed);
@@ -275,19 +309,32 @@ void app_main(void)
             // If we're very close to the obstacle, stop completely
             if (readings.front <= BRAKE_STOP_DISTANCE)
             {
-                my_wifi_log("Reached stop distance (%.1f cm)! Initiating full brake...\n", readings.front);
-                motor_brake();
+                my_wifi_log("Reached stop distance (%.1f cm)! Stopping...\n", readings.front);
+                motor_stop();
                 my_wifi_log("Car stopped.\n");
                 break;
             }
 
-            // Drive at the calculated speed
+            // Drive at the calculated speed while maintaining heading
             motor_drive_straight(target_speed);
         }
         else
         {
             // Normal driving speed when far from obstacle
-            motor_drive_straight(0.6f);
+            // Add a stronger boost if speed is very low
+            if (current_speed < 0.1f)
+            {
+                my_wifi_log("Speed too low, applying strong boost...\n");
+                motor_drive_straight(1.0f);     // Full power boost
+                vTaskDelay(pdMS_TO_TICKS(500)); // Hold for 0.5 seconds
+                motor_drive_straight(0.8f);     // Reduce to 80%
+                vTaskDelay(pdMS_TO_TICKS(200)); // Hold for 0.2 seconds
+                motor_drive_straight(0.6f);     // Back to normal speed
+            }
+            else
+            {
+                motor_drive_straight(0.6f);
+            }
         }
 
         // Small delay to prevent overwhelming the ultrasonic sensor

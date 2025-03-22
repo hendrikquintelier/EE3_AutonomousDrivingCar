@@ -12,6 +12,7 @@
 #include "lwip/sys.h"
 #include <math.h>
 #include <float.h>
+#include "motorcontrol.h"
 
 // WiFi configuration
 #define WIFI_SSID "Boenks"
@@ -89,23 +90,42 @@ void app_main(void)
     printf("Initializing MPU...\n");
     mpu_init();
 
+    // Initialize motors
+    printf("Initializing motors...\n");
+    motor_init();
+
     // Wait for MPU to stabilize
     printf("Waiting for MPU to stabilize...\n");
     vTaskDelay(pdMS_TO_TICKS(2000));
 
-    // Main loop - log MPU yaw readings
+    // Main loop - drive forward for 5 seconds while logging yaw
     float last_yaw = 0;
     uint32_t last_print_time = 0;
     const uint32_t PRINT_INTERVAL_MS = 100; // Print every 100ms
+    const uint32_t DRIVE_TIME_MS = 5000;    // Drive for 5 seconds
+    uint32_t start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+    // Start driving forward at 70% speed
+    printf("Starting to drive forward at 70%% speed...\n");
+    motor_forward_constant_speed(0.7f);
 
     while (1)
     {
-        mpu_data_t orientation = mpu_get_orientation();
         uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-        // Only print if enough time has passed
+        // Check if we've driven for 5 seconds
+        if (current_time - start_time >= DRIVE_TIME_MS)
+        {
+            printf("5 seconds elapsed, stopping motors...\n");
+            motor_stop();
+            break; // Exit the loop
+        }
+
+        // Log yaw data if enough time has passed
         if (current_time - last_print_time >= PRINT_INTERVAL_MS)
         {
+            mpu_data_t orientation = mpu_get_orientation();
+
             // Calculate yaw change rate
             float yaw_change = fabsf(orientation.yaw - last_yaw);
             if (yaw_change > 180.0f) // Handle wrap-around
@@ -130,4 +150,6 @@ void app_main(void)
 
         vTaskDelay(pdMS_TO_TICKS(10)); // Small delay to prevent overwhelming the system
     }
+
+    printf("Test complete!\n");
 }

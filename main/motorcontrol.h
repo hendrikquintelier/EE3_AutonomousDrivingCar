@@ -42,9 +42,10 @@ extern "C"
     void motor_stop(void);
 
     /**
-     * @brief Move forward at half speed (basic function, no heading correction).
+     * @brief Move forward at a constant speed (0..1).
+     * @param speed Speed value between 0 and 1 (0 = stop, 1 = full speed)
      */
-    void motor_forward_half_speed(void);
+    void motor_forward_constant_speed(float speed);
 
     /**
      * @brief Get the current speed of the car (0..1).

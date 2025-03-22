@@ -18,8 +18,8 @@
 // -----------------------------------------------------
 #define INPUT1_PIN 37 // Motor A input 1
 #define INPUT2_PIN 48 // Motor A input 2
-#define INPUT3_PIN 35 // Motor B input 3
-#define INPUT4_PIN 36 // Motor B input 4
+#define INPUT3_PIN 35 // Motor B input 1
+#define INPUT4_PIN 36 // Motor B input 2
 
 // -----------------------------------------------------
 // L293D Enable Pins (GPIO numbers)
@@ -36,9 +36,9 @@
 // -----------------------------------------------------
 // LEDC Config
 // -----------------------------------------------------
-#define LEDC_MODE LEDC_LOW_SPEED_MODE // ESP32-S3 typically only has low-speed mode
+#define LEDC_MODE LEDC_LOW_SPEED_MODE
 #define LEDC_TIMER_BITS 13
-#define LEDC_FREQUENCY 1000 // Back to 1000 Hz
+#define LEDC_FREQUENCY 5000 // Increased from 1000 Hz to 5000 Hz for smoother operation
 #define LEDC_MAX_DUTY ((1 << LEDC_TIMER_BITS) - 1)
 
 // -----------------------------------------------------
@@ -103,37 +103,41 @@ typedef struct
 // -----------------------------------------------------
 void motor_init(void)
 {
-    my_wifi_log("Initializing motor driver...\n");
+    printf("Initializing motor driver...\n");
 
-    // Configure direction pins as outputs
-    gpio_reset_pin(INPUT1_PIN);
-    gpio_reset_pin(INPUT2_PIN);
-    gpio_reset_pin(INPUT3_PIN);
-    gpio_reset_pin(INPUT4_PIN);
+    // Configure direction pins as outputs with initial state LOW
+    gpio_config_t io_conf = {
+        .intr_type = GPIO_INTR_DISABLE,
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = (1ULL << INPUT1_PIN) | (1ULL << INPUT2_PIN) |
+                        (1ULL << INPUT3_PIN) | (1ULL << INPUT4_PIN),
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE};
+    gpio_config(&io_conf);
 
-    gpio_set_direction(INPUT1_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_direction(INPUT2_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_direction(INPUT3_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_direction(INPUT4_PIN, GPIO_MODE_OUTPUT);
-
-    // Initialize them LOW
+    // Set all direction pins LOW initially
     gpio_set_level(INPUT1_PIN, 0);
     gpio_set_level(INPUT2_PIN, 0);
     gpio_set_level(INPUT3_PIN, 0);
     gpio_set_level(INPUT4_PIN, 0);
 
     // Configure enable pins for PWM
-    gpio_reset_pin(ENABLE_12_PIN);
-    gpio_reset_pin(ENABLE_34_PIN);
+    gpio_config_t pwm_conf = {
+        .intr_type = GPIO_INTR_DISABLE,
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = (1ULL << ENABLE_12_PIN) | (1ULL << ENABLE_34_PIN),
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE};
+    gpio_config(&pwm_conf);
 
     // LEDC timer config
     ledc_timer_config_t timer_config = {
         .speed_mode = LEDC_MODE,
+        .duty_resolution = LEDC_TIMER_BITS,
         .timer_num = LEDC_TIMER_0,
         .freq_hz = LEDC_FREQUENCY,
-        .duty_resolution = LEDC_TIMER_BITS,
         .clk_cfg = LEDC_AUTO_CLK};
-    ledc_timer_config(&timer_config);
+    ESP_ERROR_CHECK(ledc_timer_config(&timer_config));
 
     // Configure LEDC channel for Motor A
     ledc_channel_config_t channel_conf_a = {
@@ -142,8 +146,9 @@ void motor_init(void)
         .channel = LEDC_CHANNEL_MOTOR_A,
         .timer_sel = LEDC_TIMER_0,
         .duty = 0,
-        .hpoint = 0};
-    ledc_channel_config(&channel_conf_a);
+        .hpoint = 0,
+        .flags.output_invert = 0};
+    ESP_ERROR_CHECK(ledc_channel_config(&channel_conf_a));
 
     // Configure LEDC channel for Motor B
     ledc_channel_config_t channel_conf_b = {
@@ -152,10 +157,15 @@ void motor_init(void)
         .channel = LEDC_CHANNEL_MOTOR_B,
         .timer_sel = LEDC_TIMER_0,
         .duty = 0,
-        .hpoint = 0};
-    ledc_channel_config(&channel_conf_b);
+        .hpoint = 0,
+        .flags.output_invert = 0};
+    ESP_ERROR_CHECK(ledc_channel_config(&channel_conf_b));
 
-    my_wifi_log("Motor driver initialization complete.\n");
+    // Initialize state variables
+    current_speed_value = 0.0f;
+    is_braking_state = false;
+
+    printf("Motor driver initialization complete.\n");
 }
 
 // -----------------------------------------------------
@@ -582,4 +592,69 @@ void motor_calibrate_pid(void)
     is_calibrating = false;
 
     my_wifi_log("PID calibration complete!\n");
+}
+
+// -----------------------------------------------------
+// Move forward at half speed (basic function, no heading correction)
+// -----------------------------------------------------
+void motor_forward_half_speed(void)
+{
+    // Set direction pins for forward motion
+    gpio_set_level(INPUT1_PIN, 1);
+    gpio_set_level(INPUT2_PIN, 0);
+    gpio_set_level(INPUT3_PIN, 1);
+    gpio_set_level(INPUT4_PIN, 0);
+
+    // Set both motors to 50% speed
+    uint32_t duty = (uint32_t)(0.5f * LEDC_MAX_DUTY);
+
+    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, duty);
+    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
+
+    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, duty);
+    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
+
+    current_speed_value = 0.5f;
+    is_braking_state = false;
+}
+
+// -----------------------------------------------------
+// Move forward at a constant speed (0..1)
+// -----------------------------------------------------
+void motor_forward_constant_speed(float speed)
+{
+    // Clamp speed between 0 and 1
+    if (speed < 0.0f)
+        speed = 0.0f;
+    if (speed > 1.0f)
+        speed = 1.0f;
+
+    // First set PWM to 0 before changing direction
+    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, 0);
+    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
+    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, 0);
+    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
+
+    // Small delay to ensure PWM is off
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // Set direction pins for forward motion
+    gpio_set_level(INPUT1_PIN, 1);
+    gpio_set_level(INPUT2_PIN, 0);
+    gpio_set_level(INPUT3_PIN, 1);
+    gpio_set_level(INPUT4_PIN, 0);
+
+    // Small delay after setting direction
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // Set both motors to specified speed
+    uint32_t duty = (uint32_t)(speed * LEDC_MAX_DUTY);
+
+    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, duty);
+    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
+    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, duty);
+    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
+
+    current_speed_value = speed;
+    is_braking_state = false;
 }

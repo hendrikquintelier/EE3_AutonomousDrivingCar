@@ -24,8 +24,8 @@
 // -----------------------------------------------------
 // L293D Enable Pins (GPIO numbers)
 // -----------------------------------------------------
-#define ENABLE_12_PIN 38 // Motor A enable
-#define ENABLE_34_PIN 45 // Motor B enable
+#define ENABLE_12_PIN 38 // Motor A enable (enable 1,2)
+#define ENABLE_34_PIN 45 // Motor B enable (enable 3,4)
 
 // -----------------------------------------------------
 // LEDC Channels (software channels 0..7)
@@ -38,7 +38,7 @@
 // -----------------------------------------------------
 #define LEDC_MODE LEDC_LOW_SPEED_MODE // ESP32-S3 typically only has low-speed mode
 #define LEDC_TIMER_BITS 13
-#define LEDC_FREQUENCY 1000 // 1 kHz
+#define LEDC_FREQUENCY 1000 // Back to 1000 Hz
 #define LEDC_MAX_DUTY ((1 << LEDC_TIMER_BITS) - 1)
 
 // -----------------------------------------------------
@@ -55,11 +55,20 @@ static float desired_heading = 0.0f;
 // -----------------------------------------------------
 // PID Control Constants
 // -----------------------------------------------------
-#define HEADING_KP 0.05f           // Increased from 0.005f for stronger immediate response
-#define HEADING_KI 0.0005f         // Increased from 0.0001f for better steady-state correction
-#define HEADING_KD 0.004f          // Increased from 0.001f for better damping
-#define HEADING_I_MAX 0.1f         // Increased from 0.05f to allow more integral correction
+#define HEADING_KP 0.15f           // Increased from 0.08f for faster response
+#define HEADING_KI 0.002f          // Increased from 0.001f for better steady-state
+#define HEADING_KD 0.01f           // Increased from 0.006f for better damping
+#define HEADING_I_MAX 0.2f         // Increased from 0.15f to allow more integral action
 #define MIN_SPEED_FOR_HEADING 0.1f // Minimum speed before applying heading corrections
+
+// -----------------------------------------------------
+// Calibration Parameters
+// -----------------------------------------------------
+#define CALIBRATION_SPEED 0.4f   // Speed during calibration (40%)
+#define CALIBRATION_TIME 5000    // Calibration duration in ms
+#define CALIBRATION_SAMPLES 50   // Number of samples to collect
+#define MIN_ERROR_THRESHOLD 0.5f // Minimum error to consider for calibration
+#define MAX_OSCILLATION 2.0f     // Maximum allowed oscillation in degrees
 
 // -----------------------------------------------------
 // PID State Variables
@@ -67,16 +76,27 @@ static float desired_heading = 0.0f;
 static float heading_integral = 0.0f;
 static float last_heading_error = 0.0f;
 static uint32_t last_heading_update = 0;
+static bool is_calibrating = false;
+static float calibrated_kp = HEADING_KP;
+static float calibrated_ki = HEADING_KI;
+static float calibrated_kd = HEADING_KD;
 
 // -----------------------------------------------------
 // Additional static variables
 // -----------------------------------------------------
 static bool is_braking_state = false;
 static float current_speed_value = 0.0f;
-static float last_left_speed = 0.0f;
-static float last_right_speed = 0.0f;
-static const float MAX_SPEED_CHANGE = 0.1f; // Maximum speed change per iteration
-static bool first_run = true;
+
+// -----------------------------------------------------
+// Calibration Data Structure
+// -----------------------------------------------------
+typedef struct
+{
+    float error;
+    float derivative;
+    float integral;
+    float correction;
+} calibration_sample_t;
 
 // -----------------------------------------------------
 // Initialize the motor driver
@@ -85,29 +105,16 @@ void motor_init(void)
 {
     my_wifi_log("Initializing motor driver...\n");
 
-    // 1. Reset & configure direction pins as outputs
+    // Configure direction pins as outputs
     gpio_reset_pin(INPUT1_PIN);
     gpio_reset_pin(INPUT2_PIN);
     gpio_reset_pin(INPUT3_PIN);
     gpio_reset_pin(INPUT4_PIN);
 
-    esp_err_t ret;
-
-    ret = gpio_set_direction(INPUT1_PIN, GPIO_MODE_OUTPUT);
-    if (ret != ESP_OK)
-        my_wifi_log("Error setting INPUT1_PIN direction\n");
-
-    ret = gpio_set_direction(INPUT2_PIN, GPIO_MODE_OUTPUT);
-    if (ret != ESP_OK)
-        my_wifi_log("Error setting INPUT2_PIN direction\n");
-
-    ret = gpio_set_direction(INPUT3_PIN, GPIO_MODE_OUTPUT);
-    if (ret != ESP_OK)
-        my_wifi_log("Error setting INPUT3_PIN direction\n");
-
-    ret = gpio_set_direction(INPUT4_PIN, GPIO_MODE_OUTPUT);
-    if (ret != ESP_OK)
-        my_wifi_log("Error setting INPUT4_PIN direction\n");
+    gpio_set_direction(INPUT1_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_direction(INPUT2_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_direction(INPUT3_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_direction(INPUT4_PIN, GPIO_MODE_OUTPUT);
 
     // Initialize them LOW
     gpio_set_level(INPUT1_PIN, 0);
@@ -115,49 +122,38 @@ void motor_init(void)
     gpio_set_level(INPUT3_PIN, 0);
     gpio_set_level(INPUT4_PIN, 0);
 
-    // 2. Configure the enable pins (GPIO) for LEDC PWM
+    // Configure enable pins for PWM
     gpio_reset_pin(ENABLE_12_PIN);
     gpio_reset_pin(ENABLE_34_PIN);
 
     // LEDC timer config
-    ledc_timer_config_t ledc_timer = {
+    ledc_timer_config_t timer_config = {
         .speed_mode = LEDC_MODE,
-        .duty_resolution = LEDC_TIMER_BITS,
         .timer_num = LEDC_TIMER_0,
         .freq_hz = LEDC_FREQUENCY,
+        .duty_resolution = LEDC_TIMER_BITS,
         .clk_cfg = LEDC_AUTO_CLK};
+    ledc_timer_config(&timer_config);
 
-    ret = ledc_timer_config(&ledc_timer);
-    if (ret != ESP_OK)
-        my_wifi_log("Error configuring LEDC timer\n");
-
-    // 3. Configure LEDC channel for Motor A
+    // Configure LEDC channel for Motor A
     ledc_channel_config_t channel_conf_a = {
         .gpio_num = ENABLE_12_PIN,
         .speed_mode = LEDC_MODE,
         .channel = LEDC_CHANNEL_MOTOR_A,
         .timer_sel = LEDC_TIMER_0,
         .duty = 0,
-        .hpoint = 0,
-        .flags.output_invert = 0};
+        .hpoint = 0};
+    ledc_channel_config(&channel_conf_a);
 
-    ret = ledc_channel_config(&channel_conf_a);
-    if (ret != ESP_OK)
-        my_wifi_log("Error configuring LEDC channel A\n");
-
-    // 4. Configure LEDC channel for Motor B
+    // Configure LEDC channel for Motor B
     ledc_channel_config_t channel_conf_b = {
         .gpio_num = ENABLE_34_PIN,
         .speed_mode = LEDC_MODE,
         .channel = LEDC_CHANNEL_MOTOR_B,
         .timer_sel = LEDC_TIMER_0,
         .duty = 0,
-        .hpoint = 0,
-        .flags.output_invert = 0};
-
-    ret = ledc_channel_config(&channel_conf_b);
-    if (ret != ESP_OK)
-        my_wifi_log("Error configuring LEDC channel B\n");
+        .hpoint = 0};
+    ledc_channel_config(&channel_conf_b);
 
     my_wifi_log("Motor driver initialization complete.\n");
 }
@@ -178,126 +174,29 @@ void motor_drive_straight(float speed)
 {
     current_speed_value = speed;
     is_braking_state = false;
-    uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-    // 1. Read the current orientation
+    // Get current heading
     mpu_data_t mpu_data = mpu_get_orientation();
     float current_heading = mpu_data.yaw;
 
-    // 2. Compute heading error relative to desired_heading
-    float error = desired_heading - current_heading;
-
-    // Normalize error to -180..+180 with improved handling of 360° wrap-around
-    if (error > 180.0f)
-    {
-        error -= 360.0f;
-    }
-    else if (error < -180.0f)
-    {
-        error += 360.0f;
-    }
-
-    // On first run, set the desired heading to match current heading
-    if (first_run)
-    {
-        desired_heading = current_heading;
-        error = 0.0f;
-        first_run = false;
-        my_wifi_log("Initial heading set to %.2f°\n", current_heading);
-    }
-
-    // 3. Calculate time delta for integral and derivative terms
-    float dt = (current_time - last_heading_update) / 1000.0f; // Convert to seconds
-    if (dt > 0.1f)
-        dt = 0.1f; // Cap at 100ms
-    last_heading_update = current_time;
-
-    // 4. Update integral term with anti-windup and deadband
-    if (speed > MIN_SPEED_FOR_HEADING)
-    {
-        heading_integral += error * dt;
-        if (heading_integral > HEADING_I_MAX)
-            heading_integral = HEADING_I_MAX;
-        if (heading_integral < -HEADING_I_MAX)
-            heading_integral = -HEADING_I_MAX;
-    }
-
-    // 5. Calculate derivative term with low-pass filtering
-    float derivative = (error - last_heading_error) / dt;
-    last_heading_error = error;
-
-    // 6. Apply PID control with speed-based scaling
-    float correction = 0.0f;
-    if (speed > MIN_SPEED_FOR_HEADING)
-    {
-        // Scale correction based on error magnitude for more aggressive correction of larger errors
-        float error_scale = fabsf(error) / 180.0f;    // Normalize to 0-1
-        correction = (HEADING_KP * error +            // Proportional term
-                      HEADING_KI * heading_integral + // Integral term
-                      HEADING_KD * derivative) *      // Derivative term
-                     (speed / 0.6f) *                 // Scale by current speed
-                     (0.5f + 0.5f * error_scale);     // More aggressive for larger errors
-    }
-
-    // 7. Convert to left/right speeds with improved scaling
-    float target_left_speed = speed + correction;
-    float target_right_speed = speed - correction;
-
-    // 8. Smoothly transition to target speeds
-    float left_speed = last_left_speed;
-    float right_speed = last_right_speed;
-
-    // Smoothly adjust speeds with reduced maximum change
-    if (target_left_speed > left_speed)
-        left_speed = fminf(left_speed + MAX_SPEED_CHANGE * 0.5f, target_left_speed);
-    else
-        left_speed = fmaxf(left_speed - MAX_SPEED_CHANGE * 0.5f, target_left_speed);
-
-    if (target_right_speed > right_speed)
-        right_speed = fminf(right_speed + MAX_SPEED_CHANGE * 0.5f, target_right_speed);
-    else
-        right_speed = fmaxf(right_speed - MAX_SPEED_CHANGE * 0.5f, target_right_speed);
-
-    // Store current speeds for next iteration
-    last_left_speed = left_speed;
-    last_right_speed = right_speed;
-
-    // 9. Clamp speeds to [0..1] with improved handling
-    if (left_speed < 0)
-    {
-        right_speed += left_speed; // Transfer lost power to other wheel
-        left_speed = 0;
-    }
-    if (right_speed < 0)
-    {
-        left_speed += right_speed; // Transfer lost power to other wheel
-        right_speed = 0;
-    }
-    if (left_speed > 1.0)
-        left_speed = 1.0;
-    if (right_speed > 1.0)
-        right_speed = 1.0;
-
-    // 10. Set direction pins for forward (both motors):
-    gpio_set_level(INPUT1_PIN, 1); // Motor A forward
+    // Set direction pins for forward motion
+    gpio_set_level(INPUT1_PIN, 1);
     gpio_set_level(INPUT2_PIN, 0);
-    gpio_set_level(INPUT3_PIN, 1); // Motor B forward
+    gpio_set_level(INPUT3_PIN, 1);
     gpio_set_level(INPUT4_PIN, 0);
 
-    // 11. Compute duty cycles from speeds
-    uint32_t left_duty = (uint32_t)(left_speed * LEDC_MAX_DUTY);
-    uint32_t right_duty = (uint32_t)(right_speed * LEDC_MAX_DUTY);
+    // Calculate duty cycle
+    uint32_t duty = (uint32_t)(speed * LEDC_MAX_DUTY);
 
-    // 12. Update LEDC duty for each motor
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, left_duty);
+    // Set both motors to the same speed
+    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, duty);
     ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
 
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, right_duty);
+    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, duty);
     ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
 
-    // Debug print with enhanced information
-    my_wifi_log("Heading=%.2f°, Error=%.2f, I=%.2f, D=%.2f => L=%.2f, R=%.2f\n",
-                current_heading, error, heading_integral, derivative, left_speed, right_speed);
+    my_wifi_log("Motors set to speed %.2f (duty %lu), heading %.2f°\n",
+                speed, duty, current_heading);
 }
 
 // -----------------------------------------------------
@@ -316,12 +215,6 @@ void motor_turn_by_angle(float angle, float speed)
         target_heading += 360.0f;
 
     float tolerance = 3.0f; // degrees
-
-    // Example approach: left motor forward, right motor backward at 50% duty
-    float left_speed = 0.5f;
-    float right_speed = -0.5f;
-
-    // In real code, set direction pins and LEDC duty accordingly for each motor
 
     while (1)
     {
@@ -534,4 +427,159 @@ void motor_stop(void)
     ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
 
     my_wifi_log("Motor stop complete.\n");
+}
+
+// -----------------------------------------------------
+// Calibration Functions
+// -----------------------------------------------------
+static void analyze_calibration_data(calibration_sample_t *samples, int count)
+{
+    float max_error = 0.0f;
+    float avg_error = 0.0f;
+    float max_derivative = 0.0f;
+    float oscillation = 0.0f;
+    float steady_state_error = 0.0f;
+
+    // Calculate statistics
+    for (int i = 0; i < count; i++)
+    {
+        float abs_error = fabsf(samples[i].error);
+        max_error = fmaxf(max_error, abs_error);
+        avg_error += abs_error;
+        max_derivative = fmaxf(max_derivative, fabsf(samples[i].derivative));
+
+        // Calculate oscillation (peak-to-peak)
+        if (i > 0)
+        {
+            float delta = fabsf(samples[i].error - samples[i - 1].error);
+            oscillation = fmaxf(oscillation, delta);
+        }
+    }
+    avg_error /= count;
+    steady_state_error = samples[count - 1].error; // Final error represents steady-state
+
+    // Adjust gains based on analysis
+    if (max_error > 5.0f)
+    {
+        // System reacts too slowly or has large errors
+        calibrated_kp *= 1.2f;
+        my_wifi_log("Increasing KP (%.3f) due to large errors\n", calibrated_kp);
+    }
+
+    if (steady_state_error > MIN_ERROR_THRESHOLD)
+    {
+        // Steady-state error present
+        calibrated_ki *= 1.5f;
+        my_wifi_log("Increasing KI (%.3f) due to steady-state error\n", calibrated_ki);
+    }
+
+    if (oscillation > MAX_OSCILLATION)
+    {
+        // Too much oscillation
+        calibrated_kd *= 1.3f;
+        calibrated_kp *= 0.9f; // Reduce proportional gain
+        my_wifi_log("Adjusting KD (%.3f) and KP (%.3f) due to oscillation\n",
+                    calibrated_kd, calibrated_kp);
+    }
+
+    // Log calibration results
+    my_wifi_log("Calibration Analysis:\n");
+    my_wifi_log("Max Error: %.2f°\n", max_error);
+    my_wifi_log("Avg Error: %.2f°\n", avg_error);
+    my_wifi_log("Max Derivative: %.2f°/s\n", max_derivative);
+    my_wifi_log("Oscillation: %.2f°\n", oscillation);
+    my_wifi_log("Steady-state Error: %.2f°\n", steady_state_error);
+    my_wifi_log("Final Gains - KP: %.3f, KI: %.3f, KD: %.3f\n",
+                calibrated_kp, calibrated_ki, calibrated_kd);
+}
+
+void motor_calibrate_pid(void)
+{
+    if (is_calibrating)
+    {
+        my_wifi_log("Calibration already in progress!\n");
+        return;
+    }
+
+    my_wifi_log("Starting PID calibration...\n");
+    is_calibrating = true;
+
+    // Reset calibration values to defaults
+    calibrated_kp = HEADING_KP;
+    calibrated_ki = HEADING_KI;
+    calibrated_kd = HEADING_KD;
+    heading_integral = 0.0f;
+    last_heading_error = 0.0f;
+
+    // Allocate memory for calibration samples
+    calibration_sample_t *samples = malloc(sizeof(calibration_sample_t) * CALIBRATION_SAMPLES);
+    if (!samples)
+    {
+        my_wifi_log("Failed to allocate calibration samples!\n");
+        is_calibrating = false;
+        return;
+    }
+
+    // Set initial heading
+    mpu_data_t mpu_data = mpu_get_orientation();
+    motor_set_desired_heading(mpu_data.yaw);
+
+    // Start driving at calibration speed
+    motor_drive_straight(CALIBRATION_SPEED);
+
+    // Collect samples
+    int sample_count = 0;
+    uint32_t start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+    while (sample_count < CALIBRATION_SAMPLES)
+    {
+        uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        if (current_time - start_time > CALIBRATION_TIME)
+        {
+            my_wifi_log("Calibration timeout!\n");
+            break;
+        }
+
+        // Get current heading and calculate error
+        mpu_data = mpu_get_orientation();
+        float current_heading = mpu_data.yaw;
+        float error = motor_get_current_heading() - current_heading;
+
+        // Normalize error to [-180, +180]
+        if (error > 180.0f)
+            error -= 360.0f;
+        if (error < -180.0f)
+            error += 360.0f;
+
+        // Calculate derivative
+        float dt = 0.01f; // Fixed dt for calibration
+        float derivative = (error - last_heading_error) / dt;
+        last_heading_error = error;
+
+        // Update integral
+        heading_integral += error * dt;
+
+        // Store sample
+        samples[sample_count].error = error;
+        samples[sample_count].derivative = derivative;
+        samples[sample_count].integral = heading_integral;
+        samples[sample_count].correction = (calibrated_kp * error +
+                                            calibrated_ki * heading_integral +
+                                            calibrated_kd * derivative);
+
+        sample_count++;
+        vTaskDelay(pdMS_TO_TICKS(100)); // 100ms between samples
+    }
+
+    // Stop the car
+    motor_stop();
+
+    // Analyze the collected data
+    analyze_calibration_data(samples, sample_count);
+
+    // Free allocated memory
+    free(samples);
+    is_calibrating = false;
+
+    my_wifi_log("PID calibration complete!\n");
 }

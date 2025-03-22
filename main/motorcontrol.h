@@ -61,6 +61,13 @@ extern "C"
      */
     bool motor_is_braking(void);
 
+    /**
+     * @brief Run PID calibration routine to optimize heading control gains.
+     *        The car will drive straight at 40% speed while collecting data
+     *        and adjusting the PID parameters.
+     */
+    void motor_calibrate_pid(void);
+
 #ifdef __cplusplus
 }
 #endif

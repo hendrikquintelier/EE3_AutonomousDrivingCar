@@ -43,23 +43,24 @@
 #define DRIVE_TIME_MS 5000 // Total drive time (10 seconds)
 
 // Add these defines at the top with other defines
-#define TURN_PID_KP 0.3f         // Higher proportional gain for faster response
-#define TURN_PID_KI 0.01f        // Small integral to handle steady-state error
-#define TURN_PID_KD 0.05f        // Derivative to dampen oscillations
-#define TURN_PID_I_MAX 0.5f      // Maximum integral term
-#define TURN_SPEED 0.5f          // Base speed for turns
-#define TURN_TOLERANCE 5.0f      // Increased tolerance for turn completion
-#define TURN_TIMEOUT_MS 3000     // Maximum time to complete turn
-#define MIN_TURN_TIME_MS 300     // Minimum time to ensure full rotation
-#define CALIBRATION_SPEED 0.3f   // Speed for motor calibration
-#define CALIBRATION_TIME_MS 2000 // Time to run calibration
-#define MIN_MOTOR_FORCE 0.2f     // Minimum force each motor must apply (20% of max)
-#define TURN_DEADZONE 1.0f       // Degrees of deadzone to prevent oscillations
-#define TURN_MAX_CORRECTION 0.3f // Maximum correction factor (30% of base speed)
-#define TURN_SCALE_FACTOR 0.5f   // Scale factor for corrections near target
-#define OVERSHOOT_SPEED 0.2f     // Speed when overshooting (40% of normal speed)
-#define MOMENTUM_THRESHOLD 70.0f // Degrees at which we start using momentum
-#define MOMENTUM_SPEED 0.2f      // Speed when using momentum (40% of normal speed)
+#define TURN_PID_KP 0.3f            // Higher proportional gain for faster response
+#define TURN_PID_KI 0.01f           // Small integral to handle steady-state error
+#define TURN_PID_KD 0.05f           // Derivative to dampen oscillations
+#define TURN_PID_I_MAX 0.5f         // Maximum integral term
+#define TURN_SPEED 0.65f            // Increased from 0.5f to 0.65f (80% power)
+#define TURN_TOLERANCE 2.0f         // Reduced from 5.0f to 2.0f for more precise turns
+#define TURN_TIMEOUT_MS 3000        // Maximum time to complete turn
+#define MIN_TURN_TIME_MS 300        // Minimum time to ensure full rotation
+#define CALIBRATION_SPEED 0.3f      // Speed for motor calibration
+#define CALIBRATION_TIME_MS 2000    // Time to run calibration
+#define MIN_MOTOR_FORCE 0.4f        // Increased from 0.2f to 0.4f (40% power)
+#define TURN_DEADZONE 1.0f          // Degrees of deadzone to prevent oscillations
+#define TURN_MAX_CORRECTION 0.3f    // Maximum correction factor (30% of base speed)
+#define TURN_SCALE_FACTOR 0.5f      // Scale factor for corrections near target
+#define MOMENTUM_THRESHOLD 45.0f    // Degrees at which we switch to momentum mode
+#define MOMENTUM_SPEED 0.3f         // Increased from 0.2f to 0.3f (60% power)
+#define ANGULAR_VEL_THRESHOLD 50.0f // Degrees/second threshold for overshoot prediction
+#define BRAKE_FORCE 0.6f            // Increased from 0.4f to 0.6f (60% power)
 
 // ============================================================================
 // State Variables
@@ -400,12 +401,24 @@ void motor_turn_90(bool turn_right)
     // Initialize turn parameters
     unsigned long start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
     float initial_yaw = mpu_get_orientation().yaw;
-    float target_yaw = initial_yaw + (turn_right ? 90.0f : -90.0f);
+    float target_yaw = initial_yaw + (turn_right ? -90.0f : 90.0f);
     normalize_angle(&target_yaw);
 
-    // Set up motors for turning
+    // Variables for momentum control
+    float last_yaw = initial_yaw;
+    unsigned long last_yaw_time = start_time;
+    float angular_velocity = 0.0f;
+    bool momentum_mode = false;
+    bool braking = false;
+
+    // Set up motors for turning with full power initially
     set_motor_turn(turn_right);
     unsigned long base_duty = (unsigned long)(TURN_SPEED * PWM_MAX_DUTY);
+
+    // Log initial motor setup
+    log_remote("Starting turn with base_duty: %lu (%.1f%%)", base_duty, TURN_SPEED * 100.0f);
+
+    // Set initial motor speeds
     set_motor_speed(base_duty, base_duty);
 
     // Initialize PID control
@@ -418,44 +431,99 @@ void motor_turn_90(bool turn_right)
     // Main turn loop
     while (turn_control.is_turning)
     {
-        // Get current orientation
+        // Get current orientation and time
         mpu_data_t orientation = mpu_get_orientation();
         float current_yaw = orientation.yaw;
-        float yaw_error = target_yaw - current_yaw;
-        normalize_angle(&yaw_error);
+        unsigned long current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-        // Calculate progress percentage
+        // Calculate angular velocity
+        float dt = (current_time - last_yaw_time) / 1000.0f;
+        if (dt > 0.01f)
+        { // Only calculate if we have enough time difference
+            float yaw_diff = current_yaw - last_yaw;
+            normalize_angle(&yaw_diff);
+            angular_velocity = yaw_diff / dt;
+        }
+        last_yaw = current_yaw;
+        last_yaw_time = current_time;
+
+        // Calculate progress and error
         float progress = fabs(current_yaw - initial_yaw);
         if (progress > 90.0f)
             progress = 90.0f;
         float progress_percent = (progress / 90.0f) * 100.0f;
+        float yaw_error = target_yaw - current_yaw;
+        normalize_angle(&yaw_error);
 
-        // Update PID control
-        unsigned long current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-        float dt = (current_time - turn_control.last_update) / 1000.0f;
-        if (dt >= PID_UPDATE_MS / 1000.0f)
+        // Check if we should switch to momentum mode
+        if (!momentum_mode && progress >= MOMENTUM_THRESHOLD)
         {
-            // Calculate correction
-            float correction = calculate_turn_correction(yaw_error, dt);
-
-            // Apply correction while maintaining minimum force
-            unsigned long duty_a = base_duty + (unsigned long)(correction * PWM_MAX_DUTY);
-            unsigned long duty_b = base_duty - (unsigned long)(correction * PWM_MAX_DUTY);
-            set_motor_speed(duty_a, duty_b);
-
-            // Log status
-            log_remote("Turn progress: %.1f%%, Yaw: %.2f°, Error: %.2f°, Correction: %.2f",
-                       progress_percent, current_yaw, yaw_error, correction);
-
-            turn_control.last_update = current_time;
+            momentum_mode = true;
+            log_remote("Switching to momentum mode at %.1f%% progress", progress_percent);
         }
 
-        // Check for turn completion
-        if (fabs(yaw_error) < TURN_TOLERANCE)
+        // Calculate motor speeds based on mode
+        unsigned long duty_a, duty_b;
+        if (momentum_mode)
         {
-            // Ensure minimum time has elapsed
+            // Predict overshoot based on angular velocity
+            float predicted_overshoot = current_yaw + (angular_velocity * 0.5f); // Predict 500ms ahead
+            normalize_angle(&predicted_overshoot);
+
+            float overshoot_error = target_yaw - predicted_overshoot;
+            normalize_angle(&overshoot_error);
+
+            // If we predict overshooting, apply braking
+            if (fabs(overshoot_error) < 0 && fabs(angular_velocity) > ANGULAR_VEL_THRESHOLD)
+            {
+                braking = true;
+                log_remote("Predicted overshoot: %.2f°, Applying brake");
+            }
+
+            if (braking)
+            {
+                // Apply braking force in opposite direction
+                duty_a = (unsigned long)(BRAKE_FORCE * PWM_MAX_DUTY);
+                duty_b = (unsigned long)(BRAKE_FORCE * PWM_MAX_DUTY);
+                set_motor_turn(!turn_right); // Reverse direction for braking
+                log_remote("Braking with duty: %lu (%.1f%%)", duty_a, BRAKE_FORCE * 100.0f);
+            }
+            else
+            {
+                // Use minimum force to maintain momentum
+                duty_a = (unsigned long)(MOMENTUM_SPEED * PWM_MAX_DUTY);
+                duty_b = (unsigned long)(MOMENTUM_SPEED * PWM_MAX_DUTY);
+                log_remote("Momentum mode with duty: %lu (%.1f%%)", duty_a, MOMENTUM_SPEED * 100.0f);
+            }
+        }
+        else
+        {
+            // Full power mode until momentum threshold
+            duty_a = base_duty;
+            duty_b = base_duty;
+            log_remote("Full power mode with duty: %lu (%.1f%%)", duty_a, TURN_SPEED * 100.0f);
+        }
+
+        // Apply motor speeds
+        set_motor_speed(duty_a, duty_b);
+
+        // Log status
+        log_remote("Turn progress: %.1f%%, Yaw: %.2f°, Error: %.2f°, Ang. Vel: %.2f°/s, Mode: %s, Duty: %lu",
+                   progress_percent, current_yaw, yaw_error, angular_velocity,
+                   momentum_mode ? (braking ? "BRAKING" : "MOMENTUM") : "FULL POWER",
+                   duty_a);
+
+        // Check for turn completion
+        if (fabs(yaw_error) < TURN_TOLERANCE && fabs(angular_velocity) < 2.0f) // Reduced velocity threshold from 5.0f to 2.0f
+        {
             if (current_time - start_time >= MIN_TURN_TIME_MS)
             {
+                // Apply a stronger final brake to prevent overshooting
+                set_motor_turn(!turn_right); // Reverse direction for braking
+                set_motor_speed((unsigned long)(BRAKE_FORCE * PWM_MAX_DUTY),
+                                (unsigned long)(BRAKE_FORCE * PWM_MAX_DUTY));
+                vTaskDelay(pdMS_TO_TICKS(150)); // Increased brake duration from 100ms to 150ms
+
                 turn_control.is_turning = false;
                 log_remote("Turn completed successfully");
                 break;

@@ -1,660 +1,478 @@
 // motorcontrol.c
 
 #include "motorcontrol.h"
-#include "mpu.h"
-#include "encoder.h"
 #include "wifi_logger.h"
-#include <stdio.h>
-#include <math.h>
-#include <stdbool.h>
-
+#include "mpu.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include <stdio.h>
+#include <stdbool.h>
+#include <math.h>
 
-// -----------------------------------------------------
-// L293D Direction Pins
-// -----------------------------------------------------
-#define INPUT1_PIN 37 // Motor A input 1
-#define INPUT2_PIN 48 // Motor A input 2
-#define INPUT3_PIN 35 // Motor B input 1
-#define INPUT4_PIN 36 // Motor B input 2
+// ============================================================================
+// Hardware Configuration
+// ============================================================================
+// Motor A pins (Left motor)
+#define MOTOR_A_IN1 37 // Direction pin 1
+#define MOTOR_A_IN2 48 // Direction pin 2
+#define MOTOR_A_EN 38  // Enable pin (PWM)
 
-// -----------------------------------------------------
-// L293D Enable Pins (GPIO numbers)
-// -----------------------------------------------------
-#define ENABLE_12_PIN 38 // Motor A enable (enable 1,2)
-#define ENABLE_34_PIN 45 // Motor B enable (enable 3,4)
+// Motor B pins (Right motor)
+#define MOTOR_B_IN1 35 // Direction pin 1
+#define MOTOR_B_IN2 36 // Direction pin 2
+#define MOTOR_B_EN 45  // Enable pin (PWM)
 
-// -----------------------------------------------------
-// LEDC Channels (software channels 0..7)
-// -----------------------------------------------------
-#define LEDC_CHANNEL_MOTOR_A LEDC_CHANNEL_0
-#define LEDC_CHANNEL_MOTOR_B LEDC_CHANNEL_1
+// PWM Configuration
+#define PWM_CHANNEL_A LEDC_CHANNEL_0
+#define PWM_CHANNEL_B LEDC_CHANNEL_1
+#define PWM_MODE LEDC_LOW_SPEED_MODE
+#define PWM_RESOLUTION 13
+#define PWM_FREQ 5000
+#define PWM_MAX_DUTY ((1 << PWM_RESOLUTION) - 1)
 
-// -----------------------------------------------------
-// LEDC Config
-// -----------------------------------------------------
-#define LEDC_MODE LEDC_LOW_SPEED_MODE
-#define LEDC_TIMER_BITS 13
-#define LEDC_FREQUENCY 5000 // Increased from 1000 Hz to 5000 Hz for smoother operation
-#define LEDC_MAX_DUTY ((1 << LEDC_TIMER_BITS) - 1)
+// ============================================================================
+// PID Control Parameters
+// ============================================================================
+#define PID_KP 0.15f       // Proportional gain
+#define PID_KI 0.002f      // Integral gain
+#define PID_KD 0.01f       // Derivative gain
+#define PID_I_MAX 0.2f     // Maximum integral term
+#define PID_UPDATE_MS 50   // PID update interval
+#define DRIVE_TIME_MS 5000 // Total drive time (10 seconds)
 
-// -----------------------------------------------------
-// Global Heading State
-// -----------------------------------------------------
-static float desired_heading = 0.0f;
+// Add these defines at the top with other defines
+#define TURN_PID_KP 0.3f         // Higher proportional gain for faster response
+#define TURN_PID_KI 0.01f        // Small integral to handle steady-state error
+#define TURN_PID_KD 0.05f        // Derivative to dampen oscillations
+#define TURN_PID_I_MAX 0.5f      // Maximum integral term
+#define TURN_SPEED 0.5f          // Base speed for turns
+#define TURN_TOLERANCE 5.0f      // Increased tolerance for turn completion
+#define TURN_TIMEOUT_MS 3000     // Maximum time to complete turn
+#define MIN_TURN_TIME_MS 300     // Minimum time to ensure full rotation
+#define CALIBRATION_SPEED 0.3f   // Speed for motor calibration
+#define CALIBRATION_TIME_MS 2000 // Time to run calibration
+#define MIN_MOTOR_FORCE 0.2f     // Minimum force each motor must apply (20% of max)
+#define TURN_DEADZONE 1.0f       // Degrees of deadzone to prevent oscillations
+#define TURN_MAX_CORRECTION 0.3f // Maximum correction factor (30% of base speed)
+#define TURN_SCALE_FACTOR 0.5f   // Scale factor for corrections near target
+#define OVERSHOOT_SPEED 0.2f     // Speed when overshooting (40% of normal speed)
+#define MOMENTUM_THRESHOLD 70.0f // Degrees at which we start using momentum
+#define MOMENTUM_SPEED 0.2f      // Speed when using momentum (40% of normal speed)
 
-// -----------------------------------------------------
-// Tuning Constants
-// -----------------------------------------------------
-#define BRAKE_K 50      // Proportional gain for braking
-#define HEADING_K 0.01f // Reduced from 0.05f for gentler heading correction
+// ============================================================================
+// State Variables
+// ============================================================================
+static bool is_braking = false;
+static float current_speed = 0.0f;
+static float target_yaw = 0.0f;
+static float yaw_integral = 0.0f;
+static float last_yaw_error = 0.0f;
+static unsigned long last_pid_update = 0;
 
-// -----------------------------------------------------
-// PID Control Constants
-// -----------------------------------------------------
-#define HEADING_KP 0.15f           // Increased from 0.08f for faster response
-#define HEADING_KI 0.002f          // Increased from 0.001f for better steady-state
-#define HEADING_KD 0.01f           // Increased from 0.006f for better damping
-#define HEADING_I_MAX 0.2f         // Increased from 0.15f to allow more integral action
-#define MIN_SPEED_FOR_HEADING 0.1f // Minimum speed before applying heading corrections
+// Add these global variables at the top with other state variables
+turn_control_t turn_control = {0};
+motor_calibration_t motor_calibration = {
+    .left_factor = 1.0f,
+    .right_factor = 1.0f,
+    .is_calibrated = false};
 
-// -----------------------------------------------------
-// Calibration Parameters
-// -----------------------------------------------------
-#define CALIBRATION_SPEED 0.4f   // Speed during calibration (40%)
-#define CALIBRATION_TIME 5000    // Calibration duration in ms
-#define CALIBRATION_SAMPLES 50   // Number of samples to collect
-#define MIN_ERROR_THRESHOLD 0.5f // Minimum error to consider for calibration
-#define MAX_OSCILLATION 2.0f     // Maximum allowed oscillation in degrees
-
-// -----------------------------------------------------
-// PID State Variables
-// -----------------------------------------------------
-static float heading_integral = 0.0f;
-static float last_heading_error = 0.0f;
-static uint32_t last_heading_update = 0;
-static bool is_calibrating = false;
-static float calibrated_kp = HEADING_KP;
-static float calibrated_ki = HEADING_KI;
-static float calibrated_kd = HEADING_KD;
-
-// -----------------------------------------------------
-// Additional static variables
-// -----------------------------------------------------
-static bool is_braking_state = false;
-static float current_speed_value = 0.0f;
-
-// -----------------------------------------------------
-// Calibration Data Structure
-// -----------------------------------------------------
-typedef struct
+// ============================================================================
+// Helper Functions
+// ============================================================================
+static void set_motor_direction(bool forward)
 {
-    float error;
-    float derivative;
-    float integral;
-    float correction;
-} calibration_sample_t;
+    if (forward)
+    {
+        // Both motors forward
+        gpio_set_level(MOTOR_A_IN1, 1);
+        gpio_set_level(MOTOR_A_IN2, 0);
+        gpio_set_level(MOTOR_B_IN1, 1);
+        gpio_set_level(MOTOR_B_IN2, 0);
+    }
+    else
+    {
+        // Both motors backward
+        gpio_set_level(MOTOR_A_IN1, 0);
+        gpio_set_level(MOTOR_A_IN2, 1);
+        gpio_set_level(MOTOR_B_IN1, 0);
+        gpio_set_level(MOTOR_B_IN2, 1);
+    }
+}
 
-// -----------------------------------------------------
-// Initialize the motor driver
-// -----------------------------------------------------
+static void set_motor_turn(bool turn_right)
+{
+    if (turn_right)
+    {
+        // Right motor forward, left motor backward
+        gpio_set_level(MOTOR_A_IN1, 0); // Left motor backward
+        gpio_set_level(MOTOR_A_IN2, 1);
+        gpio_set_level(MOTOR_B_IN1, 1); // Right motor forward
+        gpio_set_level(MOTOR_B_IN2, 0);
+    }
+    else
+    {
+        // Right motor backward, left motor forward
+        gpio_set_level(MOTOR_A_IN1, 1); // Left motor forward
+        gpio_set_level(MOTOR_A_IN2, 0);
+        gpio_set_level(MOTOR_B_IN1, 0); // Right motor backward
+        gpio_set_level(MOTOR_B_IN2, 1);
+    }
+}
+
+static void set_motor_speed(unsigned long duty_a, unsigned long duty_b)
+{
+    // Ensure minimum force on both motors
+    unsigned long min_duty = (unsigned long)(MIN_MOTOR_FORCE * PWM_MAX_DUTY);
+
+    // Apply minimum force to both motors
+    duty_a = (duty_a < min_duty) ? min_duty : duty_a;
+    duty_b = (duty_b < min_duty) ? min_duty : duty_b;
+
+    // Clamp duties to valid range
+    duty_a = (duty_a > PWM_MAX_DUTY) ? PWM_MAX_DUTY : duty_a;
+    duty_b = (duty_b > PWM_MAX_DUTY) ? PWM_MAX_DUTY : duty_b;
+
+    // Update PWM duties
+    ledc_set_duty(PWM_MODE, PWM_CHANNEL_A, duty_a);
+    ledc_update_duty(PWM_MODE, PWM_CHANNEL_A);
+    ledc_set_duty(PWM_MODE, PWM_CHANNEL_B, duty_b);
+    ledc_update_duty(PWM_MODE, PWM_CHANNEL_B);
+}
+
+static void stop_motors(void)
+{
+    gpio_set_level(MOTOR_A_IN1, 0);
+    gpio_set_level(MOTOR_A_IN2, 0);
+    gpio_set_level(MOTOR_B_IN1, 0);
+    gpio_set_level(MOTOR_B_IN2, 0);
+    set_motor_speed(0, 0);
+}
+
+static float calculate_heading_correction(float error, float dt)
+{
+    // Update integral with anti-windup
+    yaw_integral += error * dt;
+    yaw_integral = (yaw_integral > PID_I_MAX) ? PID_I_MAX : (yaw_integral < -PID_I_MAX) ? -PID_I_MAX
+                                                                                        : yaw_integral;
+
+    // Calculate derivative
+    float derivative = (error - last_yaw_error) / dt;
+    last_yaw_error = error;
+
+    // Apply PID control
+    return PID_KP * error + PID_KI * yaw_integral + PID_KD * derivative;
+}
+
+static float calculate_turn_correction(float error, float dt)
+{
+    // Update integral with anti-windup
+    turn_control.integral += error * dt;
+    turn_control.integral = (turn_control.integral > TURN_PID_I_MAX) ? TURN_PID_I_MAX : (turn_control.integral < -TURN_PID_I_MAX) ? -TURN_PID_I_MAX
+                                                                                                                                  : turn_control.integral;
+
+    // Calculate derivative
+    float derivative = (error - turn_control.last_error) / dt;
+    turn_control.last_error = error;
+
+    // Apply deadzone to prevent small oscillations
+    if (fabs(error) < TURN_DEADZONE)
+    {
+        error = 0;
+        turn_control.integral = 0; // Reset integral in deadzone
+    }
+
+    // Calculate base correction
+    float correction = TURN_PID_KP * error + TURN_PID_KI * turn_control.integral + TURN_PID_KD * derivative;
+
+    // Scale down correction when close to target
+    float error_scale = 1.0f;
+    if (fabs(error) < 10.0f)
+    { // Within 10 degrees of target
+        error_scale = TURN_SCALE_FACTOR;
+    }
+
+    // Apply scaling
+    correction *= error_scale;
+
+    // Limit maximum correction
+    if (correction > TURN_MAX_CORRECTION)
+    {
+        correction = TURN_MAX_CORRECTION;
+    }
+    else if (correction < -TURN_MAX_CORRECTION)
+    {
+        correction = -TURN_MAX_CORRECTION;
+    }
+
+    return correction;
+}
+
+// Add this helper function implementation
+static void normalize_angle(float *angle)
+{
+    while (*angle > 180.0f)
+        *angle -= 360.0f;
+    while (*angle < -180.0f)
+        *angle += 360.0f;
+}
+
+static void calibrate_motors(void)
+{
+    log_remote("Starting motor calibration...");
+
+    // Set both motors to same speed
+    unsigned long base_duty = (unsigned long)(CALIBRATION_SPEED * PWM_MAX_DUTY);
+    set_motor_direction(true);
+    set_motor_speed(base_duty, base_duty);
+
+    // Get initial yaw
+    float start_yaw = mpu_get_orientation().yaw;
+    unsigned long start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+    // Run motors for calibration time
+    while ((xTaskGetTickCount() * portTICK_PERIOD_MS - start_time) < CALIBRATION_TIME_MS)
+    {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    // Get final yaw
+    float end_yaw = mpu_get_orientation().yaw;
+    float yaw_diff = end_yaw - start_yaw;
+    normalize_angle(&yaw_diff);
+
+    // If we turned right, left motor is stronger
+    // If we turned left, right motor is stronger
+    if (yaw_diff > 0)
+    {
+        motor_calibration.left_factor = 1.0f;
+        motor_calibration.right_factor = 1.0f - (yaw_diff / 90.0f);
+    }
+    else
+    {
+        motor_calibration.left_factor = 1.0f + (yaw_diff / 90.0f);
+        motor_calibration.right_factor = 1.0f;
+    }
+
+    // Ensure factors are reasonable
+    motor_calibration.left_factor = (motor_calibration.left_factor < 0.5f) ? 0.5f : (motor_calibration.left_factor > 1.5f) ? 1.5f
+                                                                                                                           : motor_calibration.left_factor;
+    motor_calibration.right_factor = (motor_calibration.right_factor < 0.5f) ? 0.5f : (motor_calibration.right_factor > 1.5f) ? 1.5f
+                                                                                                                              : motor_calibration.right_factor;
+
+    motor_calibration.is_calibrated = true;
+    log_remote("Motor calibration complete. Left factor: %.2f, Right factor: %.2f",
+               motor_calibration.left_factor, motor_calibration.right_factor);
+
+    // Stop motors
+    motor_stop();
+}
+
+// ============================================================================
+// Public Interface Functions
+// ============================================================================
 void motor_init(void)
 {
-    printf("Initializing motor driver...\n");
+    log_remote("Initializing motor driver...");
 
-    // Configure direction pins as outputs with initial state LOW
-    gpio_config_t io_conf = {
+    // Configure direction pins
+    gpio_config_t dir_conf = {
         .intr_type = GPIO_INTR_DISABLE,
         .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = (1ULL << INPUT1_PIN) | (1ULL << INPUT2_PIN) |
-                        (1ULL << INPUT3_PIN) | (1ULL << INPUT4_PIN),
+        .pin_bit_mask = (1ULL << MOTOR_A_IN1) | (1ULL << MOTOR_A_IN2) |
+                        (1ULL << MOTOR_B_IN1) | (1ULL << MOTOR_B_IN2),
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .pull_up_en = GPIO_PULLUP_DISABLE};
-    gpio_config(&io_conf);
+    gpio_config(&dir_conf);
 
-    // Set all direction pins LOW initially
-    gpio_set_level(INPUT1_PIN, 0);
-    gpio_set_level(INPUT2_PIN, 0);
-    gpio_set_level(INPUT3_PIN, 0);
-    gpio_set_level(INPUT4_PIN, 0);
-
-    // Configure enable pins for PWM
-    gpio_config_t pwm_conf = {
-        .intr_type = GPIO_INTR_DISABLE,
-        .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = (1ULL << ENABLE_12_PIN) | (1ULL << ENABLE_34_PIN),
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .pull_up_en = GPIO_PULLUP_DISABLE};
-    gpio_config(&pwm_conf);
-
-    // LEDC timer config
-    ledc_timer_config_t timer_config = {
-        .speed_mode = LEDC_MODE,
-        .duty_resolution = LEDC_TIMER_BITS,
+    // Configure PWM timer
+    ledc_timer_config_t timer_conf = {
+        .speed_mode = PWM_MODE,
+        .duty_resolution = PWM_RESOLUTION,
         .timer_num = LEDC_TIMER_0,
-        .freq_hz = LEDC_FREQUENCY,
+        .freq_hz = PWM_FREQ,
         .clk_cfg = LEDC_AUTO_CLK};
-    ESP_ERROR_CHECK(ledc_timer_config(&timer_config));
+    ledc_timer_config(&timer_conf);
 
-    // Configure LEDC channel for Motor A
-    ledc_channel_config_t channel_conf_a = {
-        .gpio_num = ENABLE_12_PIN,
-        .speed_mode = LEDC_MODE,
-        .channel = LEDC_CHANNEL_MOTOR_A,
+    // Configure PWM channels
+    ledc_channel_config_t channel_conf = {
+        .gpio_num = MOTOR_A_EN,
+        .speed_mode = PWM_MODE,
+        .channel = PWM_CHANNEL_A,
         .timer_sel = LEDC_TIMER_0,
         .duty = 0,
-        .hpoint = 0,
-        .flags.output_invert = 0};
-    ESP_ERROR_CHECK(ledc_channel_config(&channel_conf_a));
+        .hpoint = 0};
+    ledc_channel_config(&channel_conf);
+    channel_conf.gpio_num = MOTOR_B_EN;
+    channel_conf.channel = PWM_CHANNEL_B;
+    ledc_channel_config(&channel_conf);
 
-    // Configure LEDC channel for Motor B
-    ledc_channel_config_t channel_conf_b = {
-        .gpio_num = ENABLE_34_PIN,
-        .speed_mode = LEDC_MODE,
-        .channel = LEDC_CHANNEL_MOTOR_B,
-        .timer_sel = LEDC_TIMER_0,
-        .duty = 0,
-        .hpoint = 0,
-        .flags.output_invert = 0};
-    ESP_ERROR_CHECK(ledc_channel_config(&channel_conf_b));
+    // Initialize state
+    current_speed = 0.0f;
+    is_braking = false;
+    yaw_integral = 0.0f;
+    last_yaw_error = 0.0f;
+    last_pid_update = 0;
+    stop_motors();
 
-    // Initialize state variables
-    current_speed_value = 0.0f;
-    is_braking_state = false;
-
-    printf("Motor driver initialization complete.\n");
+    log_remote("Motor driver initialization complete");
 }
 
-// -----------------------------------------------------
-// Set the desired heading
-// -----------------------------------------------------
-void motor_set_desired_heading(float heading)
-{
-    desired_heading = heading;
-    my_wifi_log("Desired heading set to %.2f°\n", heading);
-}
-
-// -----------------------------------------------------
-// Drive straight with enhanced heading hold
-// -----------------------------------------------------
-void motor_drive_straight(float speed)
-{
-    current_speed_value = speed;
-    is_braking_state = false;
-
-    // Get current heading
-    mpu_data_t mpu_data = mpu_get_orientation();
-    float current_heading = mpu_data.yaw;
-
-    // Set direction pins for forward motion
-    gpio_set_level(INPUT1_PIN, 1);
-    gpio_set_level(INPUT2_PIN, 0);
-    gpio_set_level(INPUT3_PIN, 1);
-    gpio_set_level(INPUT4_PIN, 0);
-
-    // Calculate duty cycle
-    uint32_t duty = (uint32_t)(speed * LEDC_MAX_DUTY);
-
-    // Set both motors to the same speed
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, duty);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
-
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, duty);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
-
-    my_wifi_log("Motors set to speed %.2f (duty %lu), heading %.2f°\n",
-                speed, duty, current_heading);
-}
-
-// -----------------------------------------------------
-// Turn by angle (blocking) with a simple spin approach
-// -----------------------------------------------------
-void motor_turn_by_angle(float angle, float speed)
-{
-    mpu_data_t data = mpu_get_orientation();
-    float start_heading = data.yaw;
-    float target_heading = start_heading + angle;
-
-    // Normalize target heading
-    while (target_heading >= 360.0f)
-        target_heading -= 360.0f;
-    while (target_heading < 0.0f)
-        target_heading += 360.0f;
-
-    float tolerance = 3.0f; // degrees
-
-    while (1)
-    {
-        mpu_data_t d = mpu_get_orientation();
-        float curr = d.yaw;
-
-        float diff = target_heading - curr;
-        // normalize
-        while (diff > 180.0f)
-            diff -= 360.0f;
-        while (diff < -180.0f)
-            diff += 360.0f;
-
-        if (fabsf(diff) < tolerance)
-        {
-            // Stop turning
-            motor_brake(); // calls active braking
-            my_wifi_log("Turn complete. Now at heading=%.2f°\n", curr);
-            break;
-        }
-
-        // Keep turning
-        // e.g. set the direction pins for spin in place
-        // set LEDC duty = 50% on each side (one reversed)
-        // ...
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-}
-
-// -----------------------------------------------------
-// Proportional brake: apply reverse torque based on wheel speed while maintaining heading
-// -----------------------------------------------------
-void motor_brake(void)
-{
-    is_braking_state = true;
-    my_wifi_log("Proportional braking: applying reverse torque while maintaining heading...\n");
-
-    // 1. Set direction pins to reverse
-    // Motor A: IN1=LOW, IN2=HIGH
-    gpio_set_level(INPUT1_PIN, 0);
-    gpio_set_level(INPUT2_PIN, 1);
-
-    // Motor B: IN3=LOW, IN4=HIGH
-    gpio_set_level(INPUT3_PIN, 0);
-    gpio_set_level(INPUT4_PIN, 1);
-
-    // Start with duty=0 on both channels
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, 0);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
-
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, 0);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
-
-    while (1)
-    {
-        // Get current heading and calculate heading correction
-        mpu_data_t mpu_data = mpu_get_orientation();
-        float current_heading = mpu_data.yaw;
-        float error = desired_heading - current_heading;
-
-        // Normalize error to -180..+180
-        while (error > 180.0f)
-            error -= 360.0f;
-        while (error < -180.0f)
-            error += 360.0f;
-
-        // Calculate time delta for PID
-        uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-        float dt = (current_time - last_heading_update) / 1000.0f;
-        if (dt > 0.1f)
-            dt = 0.1f;
-        last_heading_update = current_time;
-
-        // Update integral term with anti-windup
-        heading_integral += error * dt;
-        if (heading_integral > HEADING_I_MAX)
-            heading_integral = HEADING_I_MAX;
-        if (heading_integral < -HEADING_I_MAX)
-            heading_integral = -HEADING_I_MAX;
-
-        // Calculate derivative term
-        float derivative = (error - last_heading_error) / dt;
-        last_heading_error = error;
-
-        // Apply PID control for heading correction
-        float heading_correction = HEADING_KP * error +
-                                   HEADING_KI * heading_integral +
-                                   HEADING_KD * derivative;
-
-        // Measure encoders for speed-based braking
-        int enc1_before = encoder_get_count(1);
-        int enc2_before = encoder_get_count(2);
-
-        vTaskDelay(pdMS_TO_TICKS(50));
-
-        int enc1_after = encoder_get_count(1);
-        int enc2_after = encoder_get_count(2);
-
-        int delta1 = enc1_after - enc1_before;
-        int delta2 = enc2_after - enc2_before;
-
-        // If both wheels are not moving => stop
-        if (delta1 == 0 && delta2 == 0)
-        {
-            my_wifi_log("Car is fully stopped.\n");
-
-            // Turn everything off
-            ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, 0);
-            ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
-
-            ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, 0);
-            ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
-
-            gpio_set_level(INPUT1_PIN, 0);
-            gpio_set_level(INPUT2_PIN, 0);
-            gpio_set_level(INPUT3_PIN, 0);
-            gpio_set_level(INPUT4_PIN, 0);
-
-            break;
-        }
-
-        // Calculate base brake duty based on wheel speeds
-        int speed1 = abs(delta1);
-        int speed2 = abs(delta2);
-
-        uint32_t base_duty1 = BRAKE_K * speed1;
-        uint32_t base_duty2 = BRAKE_K * speed2;
-        if (base_duty1 > LEDC_MAX_DUTY)
-            base_duty1 = LEDC_MAX_DUTY;
-        if (base_duty2 > LEDC_MAX_DUTY)
-            base_duty2 = LEDC_MAX_DUTY;
-
-        // Apply heading correction to brake duties
-        float correction_factor = heading_correction * LEDC_MAX_DUTY;
-        int32_t duty1 = base_duty1 + (int32_t)correction_factor;
-        int32_t duty2 = base_duty2 - (int32_t)correction_factor;
-
-        // Clamp duties to valid range
-        if (duty1 < 0)
-            duty1 = 0;
-        if (duty2 < 0)
-            duty2 = 0;
-        if (duty1 > LEDC_MAX_DUTY)
-            duty1 = LEDC_MAX_DUTY;
-        if (duty2 > LEDC_MAX_DUTY)
-            duty2 = LEDC_MAX_DUTY;
-
-        // Update motor duties
-        ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, duty1);
-        ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
-
-        ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, duty2);
-        ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
-
-        my_wifi_log("Brake => speed1=%d, speed2=%d, heading=%.2f°, error=%.2f => duty1=%ld, duty2=%ld\n",
-                    speed1, speed2, current_heading, error, duty1, duty2);
-    }
-
-    // When braking is complete, reset the state
-    is_braking_state = false;
-}
-
-float motor_get_current_speed(void)
-{
-    // Get encoder readings
-    int enc1 = encoder_get_count(1);
-    int enc2 = encoder_get_count(2);
-
-    // Calculate average speed from both encoders
-    float avg_speed = (abs(enc1) + abs(enc2)) / 2.0f;
-
-    // Normalize to 0..1 range (assuming max encoder count of 1000)
-    float normalized_speed = avg_speed / 1000.0f;
-    if (normalized_speed > 1.0f)
-        normalized_speed = 1.0f;
-
-    current_speed_value = normalized_speed;
-    return normalized_speed;
-}
-
-float motor_get_current_heading(void)
-{
-    // Get current heading from MPU
-    mpu_data_t mpu_data = mpu_get_orientation();
-    return mpu_data.yaw;
-}
-
-bool motor_is_braking(void)
-{
-    return is_braking_state;
-}
-
-// Modify the motor_stop function to update states
-void motor_stop(void)
-{
-    current_speed_value = 0.0f;
-    is_braking_state = false;
-
-    // Set direction pins to stop
-    gpio_set_level(INPUT1_PIN, 0);
-    gpio_set_level(INPUT2_PIN, 0);
-    gpio_set_level(INPUT3_PIN, 0);
-    gpio_set_level(INPUT4_PIN, 0);
-
-    // Set duty cycles to 0
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, 0);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
-
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, 0);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
-
-    my_wifi_log("Motor stop complete.\n");
-}
-
-// -----------------------------------------------------
-// Calibration Functions
-// -----------------------------------------------------
-static void analyze_calibration_data(calibration_sample_t *samples, int count)
-{
-    float max_error = 0.0f;
-    float avg_error = 0.0f;
-    float max_derivative = 0.0f;
-    float oscillation = 0.0f;
-    float steady_state_error = 0.0f;
-
-    // Calculate statistics
-    for (int i = 0; i < count; i++)
-    {
-        float abs_error = fabsf(samples[i].error);
-        max_error = fmaxf(max_error, abs_error);
-        avg_error += abs_error;
-        max_derivative = fmaxf(max_derivative, fabsf(samples[i].derivative));
-
-        // Calculate oscillation (peak-to-peak)
-        if (i > 0)
-        {
-            float delta = fabsf(samples[i].error - samples[i - 1].error);
-            oscillation = fmaxf(oscillation, delta);
-        }
-    }
-    avg_error /= count;
-    steady_state_error = samples[count - 1].error; // Final error represents steady-state
-
-    // Adjust gains based on analysis
-    if (max_error > 5.0f)
-    {
-        // System reacts too slowly or has large errors
-        calibrated_kp *= 1.2f;
-        my_wifi_log("Increasing KP (%.3f) due to large errors\n", calibrated_kp);
-    }
-
-    if (steady_state_error > MIN_ERROR_THRESHOLD)
-    {
-        // Steady-state error present
-        calibrated_ki *= 1.5f;
-        my_wifi_log("Increasing KI (%.3f) due to steady-state error\n", calibrated_ki);
-    }
-
-    if (oscillation > MAX_OSCILLATION)
-    {
-        // Too much oscillation
-        calibrated_kd *= 1.3f;
-        calibrated_kp *= 0.9f; // Reduce proportional gain
-        my_wifi_log("Adjusting KD (%.3f) and KP (%.3f) due to oscillation\n",
-                    calibrated_kd, calibrated_kp);
-    }
-
-    // Log calibration results
-    my_wifi_log("Calibration Analysis:\n");
-    my_wifi_log("Max Error: %.2f°\n", max_error);
-    my_wifi_log("Avg Error: %.2f°\n", avg_error);
-    my_wifi_log("Max Derivative: %.2f°/s\n", max_derivative);
-    my_wifi_log("Oscillation: %.2f°\n", oscillation);
-    my_wifi_log("Steady-state Error: %.2f°\n", steady_state_error);
-    my_wifi_log("Final Gains - KP: %.3f, KI: %.3f, KD: %.3f\n",
-                calibrated_kp, calibrated_ki, calibrated_kd);
-}
-
-void motor_calibrate_pid(void)
-{
-    if (is_calibrating)
-    {
-        my_wifi_log("Calibration already in progress!\n");
-        return;
-    }
-
-    my_wifi_log("Starting PID calibration...\n");
-    is_calibrating = true;
-
-    // Reset calibration values to defaults
-    calibrated_kp = HEADING_KP;
-    calibrated_ki = HEADING_KI;
-    calibrated_kd = HEADING_KD;
-    heading_integral = 0.0f;
-    last_heading_error = 0.0f;
-
-    // Allocate memory for calibration samples
-    calibration_sample_t *samples = malloc(sizeof(calibration_sample_t) * CALIBRATION_SAMPLES);
-    if (!samples)
-    {
-        my_wifi_log("Failed to allocate calibration samples!\n");
-        is_calibrating = false;
-        return;
-    }
-
-    // Set initial heading
-    mpu_data_t mpu_data = mpu_get_orientation();
-    motor_set_desired_heading(mpu_data.yaw);
-
-    // Start driving at calibration speed
-    motor_drive_straight(CALIBRATION_SPEED);
-
-    // Collect samples
-    int sample_count = 0;
-    uint32_t start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-
-    while (sample_count < CALIBRATION_SAMPLES)
-    {
-        uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-        if (current_time - start_time > CALIBRATION_TIME)
-        {
-            my_wifi_log("Calibration timeout!\n");
-            break;
-        }
-
-        // Get current heading and calculate error
-        mpu_data = mpu_get_orientation();
-        float current_heading = mpu_data.yaw;
-        float error = motor_get_current_heading() - current_heading;
-
-        // Normalize error to [-180, +180]
-        if (error > 180.0f)
-            error -= 360.0f;
-        if (error < -180.0f)
-            error += 360.0f;
-
-        // Calculate derivative
-        float dt = 0.01f; // Fixed dt for calibration
-        float derivative = (error - last_heading_error) / dt;
-        last_heading_error = error;
-
-        // Update integral
-        heading_integral += error * dt;
-
-        // Store sample
-        samples[sample_count].error = error;
-        samples[sample_count].derivative = derivative;
-        samples[sample_count].integral = heading_integral;
-        samples[sample_count].correction = (calibrated_kp * error +
-                                            calibrated_ki * heading_integral +
-                                            calibrated_kd * derivative);
-
-        sample_count++;
-        vTaskDelay(pdMS_TO_TICKS(100)); // 100ms between samples
-    }
-
-    // Stop the car
-    motor_stop();
-
-    // Analyze the collected data
-    analyze_calibration_data(samples, sample_count);
-
-    // Free allocated memory
-    free(samples);
-    is_calibrating = false;
-
-    my_wifi_log("PID calibration complete!\n");
-}
-
-// -----------------------------------------------------
-// Move forward at half speed (basic function, no heading correction)
-// -----------------------------------------------------
-void motor_forward_half_speed(void)
-{
-    // Set direction pins for forward motion
-    gpio_set_level(INPUT1_PIN, 1);
-    gpio_set_level(INPUT2_PIN, 0);
-    gpio_set_level(INPUT3_PIN, 1);
-    gpio_set_level(INPUT4_PIN, 0);
-
-    // Set both motors to 50% speed
-    uint32_t duty = (uint32_t)(0.5f * LEDC_MAX_DUTY);
-
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, duty);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
-
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, duty);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
-
-    current_speed_value = 0.5f;
-    is_braking_state = false;
-}
-
-// -----------------------------------------------------
-// Move forward at a constant speed (0..1)
-// -----------------------------------------------------
 void motor_forward_constant_speed(float speed)
 {
-    // Clamp speed between 0 and 1
-    if (speed < 0.0f)
-        speed = 0.0f;
-    if (speed > 1.0f)
-        speed = 1.0f;
+    // Input validation
+    speed = (speed < 0.0f) ? 0.0f : (speed > 1.0f) ? 1.0f
+                                                   : speed;
 
-    // First set PWM to 0 before changing direction
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, 0);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, 0);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
+    // Initialize drive parameters
+    unsigned long start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    unsigned long current_time = start_time;
+    target_yaw = mpu_get_orientation().yaw; // Get initial heading
+    log_remote("Starting straight drive at %.0f%% speed, target yaw: %.2f°", speed * 100, target_yaw);
 
-    // Small delay to ensure PWM is off
-    vTaskDelay(pdMS_TO_TICKS(10));
+    // Set up motors for forward motion
+    set_motor_direction(true);
+    unsigned long base_duty = (unsigned long)(speed * PWM_MAX_DUTY);
+    set_motor_speed(base_duty, base_duty);
 
-    // Set direction pins for forward motion
-    gpio_set_level(INPUT1_PIN, 1);
-    gpio_set_level(INPUT2_PIN, 0);
-    gpio_set_level(INPUT3_PIN, 1);
-    gpio_set_level(INPUT4_PIN, 0);
+    // Main drive loop
+    while (current_time - start_time < DRIVE_TIME_MS)
+    {
+        // Get current orientation
+        mpu_data_t orientation = mpu_get_orientation();
+        float current_yaw = orientation.yaw;
 
-    // Small delay after setting direction
-    vTaskDelay(pdMS_TO_TICKS(10));
+        // Calculate heading error (-180 to 180 degrees)
+        float yaw_error = target_yaw - current_yaw;
+        while (yaw_error > 180.0f)
+            yaw_error -= 360.0f;
+        while (yaw_error < -180.0f)
+            yaw_error += 360.0f;
 
-    // Set both motors to specified speed
-    uint32_t duty = (uint32_t)(speed * LEDC_MAX_DUTY);
+        // Update PID control
+        unsigned long new_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        float dt = (new_time - last_pid_update) / 1000.0f;
+        if (dt >= PID_UPDATE_MS / 1000.0f)
+        {
+            // Calculate heading correction
+            float correction = calculate_heading_correction(yaw_error, dt);
 
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A, duty);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_A);
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B, duty);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_MOTOR_B);
+            // Apply correction to motor speeds
+            unsigned long duty_a = base_duty + (unsigned long)(correction * PWM_MAX_DUTY);
+            unsigned long duty_b = base_duty - (unsigned long)(correction * PWM_MAX_DUTY);
 
-    current_speed_value = speed;
-    is_braking_state = false;
+            // Set motor speeds
+            set_motor_speed(duty_a, duty_b);
+
+            // Log status periodically
+            if ((current_time - start_time) % 1000 < 50) // Log roughly every second
+            {
+                log_remote("Yaw: %.2f°, Error: %.2f°, Correction: %.2f",
+                           current_yaw, yaw_error, correction);
+            }
+
+            last_pid_update = new_time;
+        }
+
+        // Update time and delay
+        current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    // Drive complete
+    log_remote("Drive time elapsed, stopping motors...");
+    motor_stop();
+}
+
+void motor_stop(void)
+{
+    current_speed = 0.0f;
+    is_braking = false;
+    yaw_integral = 0.0f;
+    last_yaw_error = 0.0f;
+    stop_motors();
+    log_remote("Motor stop complete");
+}
+
+void motor_turn_90(bool turn_right)
+{
+    // Initialize turn parameters
+    unsigned long start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    float initial_yaw = mpu_get_orientation().yaw;
+    float target_yaw = initial_yaw + (turn_right ? 90.0f : -90.0f);
+    normalize_angle(&target_yaw);
+
+    // Set up motors for turning
+    set_motor_turn(turn_right);
+    unsigned long base_duty = (unsigned long)(TURN_SPEED * PWM_MAX_DUTY);
+    set_motor_speed(base_duty, base_duty);
+
+    // Initialize PID control
+    turn_control.integral = 0.0f;
+    turn_control.last_error = 0.0f;
+    turn_control.target_yaw = target_yaw;
+    turn_control.last_update = start_time;
+    turn_control.is_turning = true;
+
+    // Main turn loop
+    while (turn_control.is_turning)
+    {
+        // Get current orientation
+        mpu_data_t orientation = mpu_get_orientation();
+        float current_yaw = orientation.yaw;
+        float yaw_error = target_yaw - current_yaw;
+        normalize_angle(&yaw_error);
+
+        // Calculate progress percentage
+        float progress = fabs(current_yaw - initial_yaw);
+        if (progress > 90.0f)
+            progress = 90.0f;
+        float progress_percent = (progress / 90.0f) * 100.0f;
+
+        // Update PID control
+        unsigned long current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        float dt = (current_time - turn_control.last_update) / 1000.0f;
+        if (dt >= PID_UPDATE_MS / 1000.0f)
+        {
+            // Calculate correction
+            float correction = calculate_turn_correction(yaw_error, dt);
+
+            // Apply correction while maintaining minimum force
+            unsigned long duty_a = base_duty + (unsigned long)(correction * PWM_MAX_DUTY);
+            unsigned long duty_b = base_duty - (unsigned long)(correction * PWM_MAX_DUTY);
+            set_motor_speed(duty_a, duty_b);
+
+            // Log status
+            log_remote("Turn progress: %.1f%%, Yaw: %.2f°, Error: %.2f°, Correction: %.2f",
+                       progress_percent, current_yaw, yaw_error, correction);
+
+            turn_control.last_update = current_time;
+        }
+
+        // Check for turn completion
+        if (fabs(yaw_error) < TURN_TOLERANCE)
+        {
+            // Ensure minimum time has elapsed
+            if (current_time - start_time >= MIN_TURN_TIME_MS)
+            {
+                turn_control.is_turning = false;
+                log_remote("Turn completed successfully");
+                break;
+            }
+        }
+
+        // Check for timeout
+        if (current_time - start_time >= TURN_TIMEOUT_MS)
+        {
+            turn_control.is_turning = false;
+            log_remote("Turn timeout reached");
+            break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    // Stop motors
+    motor_stop();
 }

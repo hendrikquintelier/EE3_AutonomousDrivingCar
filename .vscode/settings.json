@@ -1,6 +1,6 @@
 {
     "C_Cpp.intelliSenseEngine": "default",
-    "idf.espIdfPathWin": "C:\\Users\\Hendrik Quintelier\\esp\\v5.4\\esp-idf",
+    "idf.espIdfPathWin": "C:\\Users\\Laptop\\esp\\v5.2.5\\esp-idf",
     "idf.openOcdConfigs": [
         "board/esp32s3-builtin.cfg"
     ],

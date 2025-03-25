@@ -2,34 +2,34 @@
 	"sources" : 
 	[
 		{
-			"file" : "C:/Workspace/EE3/EE3_AutonomousDrivingCar/build/CMakeFiles/bootloader"
+			"file" : "C:/ESP32_Projects/EE3_AutonomousDrivingCar/build/CMakeFiles/bootloader"
 		},
 		{
-			"file" : "C:/Workspace/EE3/EE3_AutonomousDrivingCar/build/CMakeFiles/bootloader.rule"
+			"file" : "C:/ESP32_Projects/EE3_AutonomousDrivingCar/build/CMakeFiles/bootloader.rule"
 		},
 		{
-			"file" : "C:/Workspace/EE3/EE3_AutonomousDrivingCar/build/CMakeFiles/bootloader-complete.rule"
+			"file" : "C:/ESP32_Projects/EE3_AutonomousDrivingCar/build/CMakeFiles/bootloader-complete.rule"
 		},
 		{
-			"file" : "C:/Workspace/EE3/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule"
+			"file" : "C:/ESP32_Projects/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule"
 		},
 		{
-			"file" : "C:/Workspace/EE3/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule"
+			"file" : "C:/ESP32_Projects/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule"
 		},
 		{
-			"file" : "C:/Workspace/EE3/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule"
+			"file" : "C:/ESP32_Projects/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule"
 		},
 		{
-			"file" : "C:/Workspace/EE3/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule"
+			"file" : "C:/ESP32_Projects/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule"
 		},
 		{
-			"file" : "C:/Workspace/EE3/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule"
+			"file" : "C:/ESP32_Projects/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule"
 		},
 		{
-			"file" : "C:/Workspace/EE3/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule"
+			"file" : "C:/ESP32_Projects/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule"
 		},
 		{
-			"file" : "C:/Workspace/EE3/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule"
+			"file" : "C:/ESP32_Projects/EE3_AutonomousDrivingCar/build/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule"
 		}
 	],
 	"target" : 

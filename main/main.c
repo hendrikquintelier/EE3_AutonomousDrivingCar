@@ -17,7 +17,7 @@
 // WiFi configuration
 #define WIFI_SSID "Boenks"
 #define WIFI_PASSWORD "boenkie123"
-#define SERVER_IP "192.168.118.87"
+#define SERVER_IP "192.168.48.87"
 #define SERVER_PORT 1234
 
 // Event handler for WiFi events

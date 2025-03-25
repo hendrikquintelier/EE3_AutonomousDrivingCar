@@ -23,10 +23,22 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <time.h>
+#include "esp_timer.h"
+#include "driver/gpio.h"
+
+// WiFi credentials
+#define WIFI_SSID "Boenks"
+#define WIFI_PASSWORD "boenkie123"
+
+// Server configuration
+#define SERVER_IP "192.168.48.87"
+#define SERVER_PORT 1234
 
 #define MAX_BUFFER_SIZE 50
 #define MAX_ERROR_TIME_MS 10000 // 10 seconds
 #define MAX_MESSAGE_LENGTH 160
+#define MAX_WIFI_RETRY_COUNT 40  // Increased from 20 to 40 attempts
+#define WIFI_RETRY_DELAY_MS 2000 // Increased from 1000 to 2000ms
 
 typedef struct
 {
@@ -58,7 +70,7 @@ static int buffer_count = 0;
 static uint32_t first_error_time = 0;
 static bool error_reported = false;
 
-// Add these new static variables at the top with other static variables
+// Socket state variables
 static bool socket_initialized = false;
 static bool socket_needs_recreation = false;
 static uint32_t last_socket_recreation = 0;
@@ -166,13 +178,6 @@ static esp_err_t create_udp_socket(const char *server_ip, uint16_t server_port)
 {
     uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-    // Check cooldown period
-    if (current_time - last_socket_recreation < SOCKET_RECREATION_COOLDOWN_MS)
-    {
-        printf("Waiting for socket recreation cooldown...\n");
-        return ESP_FAIL;
-    }
-
     // Close existing socket if any
     if (sock >= 0)
     {
@@ -244,59 +249,110 @@ static esp_err_t create_udp_socket(const char *server_ip, uint16_t server_port)
         printf("WARNING: Failed to set socket timeout: errno %d\n", errno);
     }
 
-    // Only send test packet if this is the initial connection
-    static bool initial_connection = true;
-    if (initial_connection)
+    // Send test packet
+    const char *test_msg = "ESP32 Connected";
+    printf("Sending test packet to %s:%d...\n", server_ip, server_port);
+    int err = sendto(sock, test_msg, strlen(test_msg), 0, &dest_addr, sizeof(dest_addr));
+    if (err < 0)
     {
-        const char *test_msg = "ESP32 Connected";
-        printf("Sending test packet to %s:%d...\n", server_ip, server_port);
-        int err = sendto(sock, test_msg, strlen(test_msg), 0, &dest_addr, sizeof(dest_addr));
-        if (err < 0)
-        {
-            printf("WARNING: Failed to send test packet: errno %d\n", errno);
-            printf("Error details: %s\n", strerror(errno));
-        }
-        else
-        {
-            printf("Successfully sent test packet to %s:%d\n", server_ip, server_port);
-            initial_connection = false;
-            last_successful_send = current_time;
-            socket_initialized = true; // Mark socket as initialized after successful test packet
-        }
+        printf("WARNING: Failed to send test packet: errno %d\n", errno);
+        printf("Error details: %s\n", strerror(errno));
+        close(sock);
+        sock = -1;
+        return ESP_FAIL;
+    }
+    else
+    {
+        printf("Successfully sent test packet to %s:%d\n", server_ip, server_port);
+        last_successful_send = current_time;
+        socket_initialized = true;
     }
 
     last_socket_recreation = current_time;
     return ESP_OK;
 }
 
-esp_err_t wifi_logger_init(const char *ssid, const char *password, const char *server_ip_param, uint16_t server_port_param)
+// Initialize WiFi connection
+static esp_err_t init_wifi(const char *ssid, const char *password)
 {
-    printf("Initializing WiFi logger...\n");
+    printf("init_wifi called with SSID: '%s', Password length: %d\n", WIFI_SSID, strlen(WIFI_PASSWORD));
 
-    // Store WiFi credentials
-    strncpy(wifi_ssid, ssid, sizeof(wifi_ssid) - 1);
-    wifi_ssid[sizeof(wifi_ssid) - 1] = '\0';
-    strncpy(wifi_password, password, sizeof(wifi_password) - 1);
-    wifi_password[sizeof(wifi_password) - 1] = '\0';
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
 
-    // Store server info
-    strncpy(server_ip, server_ip_param, sizeof(server_ip) - 1);
-    server_ip[sizeof(server_ip) - 1] = '\0';
-    server_port = server_port_param;
+    // Initialize TCP/IP adapter
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
 
-    // Create event group for WiFi events
-    wifi_event_group = xEventGroupCreate();
+    // Initialize WiFi
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
     // Register event handlers
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
+
+    // Configure WiFi
+    wifi_config_t wifi_config = {
+        .sta = {
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+            .pmf_cfg = {
+                .capable = true,
+                .required = false},
+        },
+    };
+
+    // Copy SSID and password to the configuration structure
+    strncpy((char *)wifi_config.sta.ssid, WIFI_SSID, sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char *)wifi_config.sta.password, WIFI_PASSWORD, sizeof(wifi_config.sta.password) - 1);
+
+    printf("WiFi config set - SSID: '%s', Password length: %d\n", wifi_config.sta.ssid, strlen((char *)wifi_config.sta.password));
+
+    // Set WiFi mode and start
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_connect());
+
+    return ESP_OK;
+}
+
+esp_err_t wifi_logger_init(void)
+{
+    printf("Initializing WiFi logger...\n");
+    printf("Using WiFi credentials - SSID: '%s', Password length: %d\n", WIFI_SSID, strlen(WIFI_PASSWORD));
+    printf("Connecting to server at %s:%d\n", SERVER_IP, SERVER_PORT);
+
+    // Store server info
+    strncpy(server_ip, SERVER_IP, sizeof(server_ip) - 1);
+    server_ip[sizeof(server_ip) - 1] = '\0';
+    server_port = SERVER_PORT;
+
+    // Create event group for WiFi events
+    wifi_event_group = xEventGroupCreate();
+
+    // Initialize WiFi
+    if (init_wifi(WIFI_SSID, WIFI_PASSWORD) != ESP_OK)
+    {
+        printf("Failed to initialize WiFi\n");
+        return ESP_FAIL;
+    }
 
     // Wait for WiFi to be connected and have a valid IP
     wifi_ap_record_t ap_info;
     int retry_count = 0;
     bool got_valid_ip = false;
 
-    while (retry_count < 20 && !got_valid_ip)
+    printf("Attempting to connect to WiFi network '%s'...\n", WIFI_SSID);
+
+    while (retry_count < MAX_WIFI_RETRY_COUNT && !got_valid_ip)
     {
         if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK)
         {
@@ -326,22 +382,23 @@ esp_err_t wifi_logger_init(const char *ssid, const char *password, const char *s
                 }
             }
         }
-        printf("Waiting for WiFi connection... (attempt %d/20)\n", retry_count + 1);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        printf("Waiting for WiFi connection... (attempt %d/%d)\n", retry_count + 1, MAX_WIFI_RETRY_COUNT);
+        vTaskDelay(pdMS_TO_TICKS(WIFI_RETRY_DELAY_MS));
         retry_count++;
     }
 
     if (!got_valid_ip)
     {
-        printf("ERROR: Failed to get valid IP address after 20 attempts\n");
+        printf("ERROR: Failed to get valid IP address after %d attempts\n", MAX_WIFI_RETRY_COUNT);
         return ESP_FAIL;
     }
 
-    // Add a small delay to ensure network stack is ready
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    // Add a longer delay to ensure network stack is ready
+    printf("Waiting for network stack to stabilize...\n");
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
     // Create UDP socket
-    if (create_udp_socket(server_ip, server_port) != ESP_OK)
+    if (create_udp_socket(SERVER_IP, SERVER_PORT) != ESP_OK)
     {
         return ESP_FAIL;
     }
@@ -364,7 +421,7 @@ esp_err_t wifi_logger_init(const char *ssid, const char *password, const char *s
         return ESP_FAIL;
     }
 
-    printf("WiFi logger initialized successfully - connecting to %s:%d\n", server_ip, server_port);
+    printf("WiFi logger initialized successfully - connecting to %s:%d\n", SERVER_IP, SERVER_PORT);
     return ESP_OK;
 }
 
@@ -381,140 +438,28 @@ static void format_timestamp(char *timestamp, size_t max_len, uint32_t ms_since_
              hours, minutes, seconds, ms);
 }
 
-void my_wifi_log(const char *format, ...)
+void log_remote(const char *format, ...)
 {
-    uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-
-    // Check if WiFi is connected
-    if (!wifi_connected)
+    // Only log if WiFi is connected and socket is initialized
+    if (!wifi_connected || !socket_initialized)
     {
-        // Try to reconnect if not connected
-        wifi_ap_record_t ap_info;
-        if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK)
-        {
-            printf("WiFi disconnected, attempting to reconnect...\n");
-            esp_wifi_connect();
-            return;
-        }
-        else
-        {
-            printf("WiFi reconnected successfully\n");
-            wifi_connected = true;
-        }
-    }
-
-    // Rate limit log messages
-    if (current_time - last_log_time < MIN_LOG_INTERVAL_MS)
-    {
-        return;
-    }
-    last_log_time = current_time;
-
-    // Check if socket needs recreation
-    bool should_recreate = false;
-    if (sock < 0)
-    {
-        should_recreate = true;
-    }
-    else if (socket_needs_recreation)
-    {
-        should_recreate = true;
-    }
-    else if (!socket_initialized && current_time - last_successful_send > SOCKET_TIMEOUT_MS)
-    {
-        should_recreate = true;
-    }
-
-    if (should_recreate)
-    {
-        if (current_time - last_retry_time >= RETRY_DELAY_MS && retry_count < MAX_RETRY_COUNT)
-        {
-            printf("Attempting to recreate socket (attempt %d/%d)...\n", retry_count + 1, MAX_RETRY_COUNT);
-            if (create_udp_socket(server_ip, server_port) == ESP_OK)
-            {
-                retry_count = 0;
-                socket_initialized = true;
-                socket_needs_recreation = false;
-                printf("Socket recreated successfully\n");
-                // Try to send buffered messages after socket recreation
-                send_buffered_messages();
-            }
-            else
-            {
-                retry_count++;
-                last_retry_time = current_time;
-            }
-        }
+        printf("Warning: Attempted to log before WiFi connection was established\n");
         return;
     }
 
     va_list args;
     va_start(args, format);
-    vsnprintf(rx_buffer, sizeof(rx_buffer), format, args);
+    char message[256];
+    vsnprintf(message, sizeof(message), format, args);
     va_end(args);
 
-    // Add formatted timestamp to the message
-    char timestamp[32];
-    format_timestamp(timestamp, sizeof(timestamp), current_time);
+    // Add timestamp
+    char log_message[512];
+    uint64_t timestamp = esp_timer_get_time() / 1000; // Convert to milliseconds
+    snprintf(log_message, sizeof(log_message), "[%llu] %s", timestamp, message);
 
-    // Combine timestamp and message
-    char full_message[160];
-    snprintf(full_message, sizeof(full_message), "%s %s", timestamp, rx_buffer);
-
-    // Try to send the message with a small delay between attempts
-    int err = sendto(sock, full_message, strlen(full_message), 0,
-                     &dest_addr, sizeof(dest_addr));
-
-    if (err < 0)
-    {
-        printf("Failed to send message: errno %d\n", errno);
-
-        // Only buffer message if it's not an out of memory error
-        if (errno != 12) // 12 is ENOMEM (Out of memory)
-        {
-            add_to_buffer(full_message, current_time);
-        }
-
-        // Check if we should report an error
-        if (!error_reported && first_error_time > 0)
-        {
-            uint32_t error_duration = current_time - first_error_time;
-            if (error_duration >= MAX_ERROR_TIME_MS)
-            {
-                printf("Sustained connection issues for %d seconds\n", MAX_ERROR_TIME_MS / 1000);
-                error_reported = true;
-            }
-        }
-
-        // If we get an out of memory error, try to recover
-        if (errno == 12)
-        {
-            printf("Out of memory error, attempting to recover...\n");
-            // Close and recreate socket
-            if (sock >= 0)
-            {
-                close(sock);
-                sock = -1;
-            }
-            // Clear message buffer
-            buffer_head = 0;
-            buffer_tail = 0;
-            buffer_count = 0;
-            // Try to recreate socket
-            create_udp_socket(server_ip, server_port);
-        }
-    }
-    else
-    {
-        retry_count = 0;
-        last_successful_send = current_time;
-        socket_initialized = true;
-        // Try to send any buffered messages after successful send
-        send_buffered_messages();
-    }
-
-    // Add a small delay between sends to prevent overwhelming the system
-    vTaskDelay(pdMS_TO_TICKS(20)); // Increased delay between sends
+    // Send to server
+    sendto(sock, log_message, strlen(log_message), 0, &dest_addr, sizeof(dest_addr));
 }
 
 void wifi_logger_deinit(void)

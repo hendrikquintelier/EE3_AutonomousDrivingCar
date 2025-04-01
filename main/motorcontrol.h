@@ -15,6 +15,10 @@ void motor_turn_90(bool turn_right);
 // Stop all motors
 void motor_stop(void);
 
+// Check for available paths and turn accordingly
+// Returns true if a path was found and turned to
+bool check_and_turn_available_path(void);
+
 // Helper function declarations
 static void normalize_angle(float *angle);
 static void calibrate_motors(void);
@@ -36,8 +40,20 @@ typedef struct
     bool is_calibrated;
 } motor_calibration_t;
 
+typedef struct
+{
+    float integral;
+    float last_error;
+    float kp;
+    float ki;
+    float kd;
+    float i_max;
+} turn_pid_t;
+
 // Global variables
 extern turn_control_t turn_control;
 extern motor_calibration_t motor_calibration;
+
+void test_motors_sequence(void);
 
 #endif // MOTORCONTROL_H

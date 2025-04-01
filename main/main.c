@@ -3,6 +3,7 @@
 #include "freertos/task.h"
 #include "mpu.h"
 #include "wifi_logger.h"
+#include "ultrasonic.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "nvs_flash.h"
@@ -21,43 +22,49 @@
 // ============================================================================
 void app_main(void)
 {
-    // Initialize WiFi
-    printf("Initializing WiFi...\n");
-    if (wifi_logger_init() != ESP_OK)
-    {
-        printf("Failed to initialize WiFi logger\n");
-        return;
-    }
-    printf("WiFi initialization complete\n");
-
-    // Initialize hardware
-    printf("Initializing MPU...\n");
-    if (mpu_init() != 0)
-    {
-        printf("Failed to initialize MPU\n");
-        return;
-    }
-    printf("MPU initialization complete\n");
-
-    printf("Initializing motors...\n");
+    // Initialize components
+    wifi_logger_init();
+    mpu_init();
+    ultrasonic_init();
     motor_init();
-    printf("Motor initialization complete\n");
+
+    // Run motor test sequence
+    // test_motors_sequence();
 
     // Wait for MPU to stabilize
-    printf("Waiting for MPU to stabilize...\n");
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    printf("MPU stabilization complete\n");
+    // vTaskDelay(pdMS_TO_TICKS(1000));
 
-    // Start driving forward with yaw control
-    log_remote("Starting movement sequence...");
+    // Test sequence
+    // log_remote("Starting test sequence...");
 
-    // First turn 90 degrees right
-    log_remote("Performing 90-degree right turn...");
+    // First turn left
+    log_remote("Testing left turn...");
+    motor_turn_90(false);
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Wait a second between turns
+
+    // Then turn right
+    log_remote("Testing right turn...");
     motor_turn_90(true);
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Wait a second between turns
 
-    // Then drive forward
-    // log_remote("Starting straight drive test...");
-    // motor_forward_constant_speed(MOTOR_SPEED);
+    // Finally drive forward until wall detection
+    log_remote("Starting forward drive until wall detection...");
+    motor_forward_constant_speed(0.7f); // Drive at 50% speed
 
-    log_remote("Test complete!");
+    // Check for available paths and turn if found
+
+    // log_remote("Checking for available paths...");
+    // if (check_and_turn_available_path())
+    //{
+    //     log_remote("Path found and turned, continuing forward...");
+    //     motor_forward_constant_speed(0.5f); // Continue driving after turn
+    // }
+    // else
+    //{
+    //     log_remote("No available paths found");
+    // }
+
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Wait a second after stopping
+
+    log_remote("Test sequence complete!");
 }

@@ -13,8 +13,9 @@
 #include <math.h>
 #include <float.h>
 #include "motorcontrol.h"
+#include "ultrasonic.h"
 
-#define MOTOR_SPEED 0.7f // 70% speed
+#define MOTOR_SPEED 0.6f // 70% speed
 
 // ============================================================================
 // Main Entry Point
@@ -39,6 +40,10 @@ void app_main(void)
     }
     printf("MPU initialization complete\n");
 
+    printf("Initializing ultrasonic sensors...\n");
+    ultrasonic_init();
+    printf("Ultrasonic initialization complete\n");
+
     printf("Initializing motors...\n");
     motor_init();
     printf("Motor initialization complete\n");
@@ -53,11 +58,10 @@ void app_main(void)
 
     // First turn 90 degrees right
     log_remote("Performing 90-degree right turn...");
-    motor_turn_90(true);
 
     // Then drive forward
     // log_remote("Starting straight drive test...");
-    // motor_forward_constant_speed(MOTOR_SPEED);
+    motor_forward_constant_speed(MOTOR_SPEED);
 
     log_remote("Test complete!");
 }

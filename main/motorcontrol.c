@@ -3,6 +3,7 @@
 #include "motorcontrol.h"
 #include "wifi_logger.h"
 #include "mpu.h"
+#include "ultrasonic.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -30,17 +31,21 @@
 #define PWM_MODE LEDC_LOW_SPEED_MODE
 #define PWM_RESOLUTION 13
 #define PWM_FREQ 5000
-#define PWM_MAX_DUTY ((1 << PWM_RESOLUTION) - 1)
+#define PWM_MAX_DUTY ((1 << PWM_RESOLUTION) - 1) // Maximum PWM duty cycle value (8191 for 13-bit)
 
 // ============================================================================
 // PID Control Parameters
 // ============================================================================
-#define PID_KP 0.15f       // Proportional gain
-#define PID_KI 0.002f      // Integral gain
-#define PID_KD 0.01f       // Derivative gain
-#define PID_I_MAX 0.2f     // Maximum integral term
-#define PID_UPDATE_MS 50   // PID update interval
-#define DRIVE_TIME_MS 5000 // Total drive time (10 seconds)
+#define PID_KP 0.02f         // Further reduced for gentler response
+#define PID_KI 0.0002f       // Reduced integral action
+#define PID_KD 0.00015f      // Increased derivative gain for better damping
+#define PID_I_MAX 0.03f      // Reduced integral windup limit
+#define PID_UPDATE_MS 10     // Reduced update interval for more responsive control
+#define DRIVE_TIME_MS 5000   // Total drive time (10 seconds)
+#define PID_DEADZONE 1.0f    // Increased deadzone to prevent small oscillations
+#define MAX_CORRECTION 0.15f // Reduced maximum correction to 15% of base speed
+#define MIN_DUTY_RATIO 0.4f  // Increased minimum duty ratio to 40%
+#define MAX_DUTY_RATIO 0.6f  // Reduced maximum duty ratio to 60%
 
 // Add these defines at the top with other defines
 #define TURN_PID_KP 0.3f            // Higher proportional gain for faster response
@@ -153,17 +158,54 @@ static void stop_motors(void)
 
 static float calculate_heading_correction(float error, float dt)
 {
+    // Apply deadzone to prevent small oscillations
+    if (fabs(error) < PID_DEADZONE)
+    {
+        error = 0;
+        yaw_integral = 0; // Reset integral in deadzone
+    }
+
     // Update integral with anti-windup
     yaw_integral += error * dt;
     yaw_integral = (yaw_integral > PID_I_MAX) ? PID_I_MAX : (yaw_integral < -PID_I_MAX) ? -PID_I_MAX
                                                                                         : yaw_integral;
 
-    // Calculate derivative
+    // Calculate derivative with low-pass filter
     float derivative = (error - last_yaw_error) / dt;
     last_yaw_error = error;
 
-    // Apply PID control
-    return PID_KP * error + PID_KI * yaw_integral + PID_KD * derivative;
+    // Apply exponential smoothing to derivative to reduce noise
+    static float smoothed_derivative = 0;
+    float alpha = 0.3f; // Smoothing factor
+    smoothed_derivative = alpha * derivative + (1 - alpha) * smoothed_derivative;
+
+    // Apply PID control with derivative smoothing
+    float correction = PID_KP * error + PID_KI * yaw_integral + PID_KD * smoothed_derivative;
+
+    // Scale correction based on error magnitude
+    float error_scale = 1.0f;
+    if (fabs(error) > 10.0f)
+    {
+        error_scale = 0.8f; // Reduce correction for large errors
+    }
+    else if (fabs(error) < 5.0f)
+    {
+        error_scale = 0.6f; // Further reduce correction for small errors
+    }
+
+    correction *= error_scale;
+
+    // Limit maximum correction
+    if (correction > MAX_CORRECTION)
+    {
+        correction = MAX_CORRECTION;
+    }
+    else if (correction < -MAX_CORRECTION)
+    {
+        correction = -MAX_CORRECTION;
+    }
+
+    return correction;
 }
 
 static float calculate_turn_correction(float error, float dt)
@@ -270,6 +312,12 @@ static void calibrate_motors(void)
     motor_stop();
 }
 
+// Helper: Delay in milliseconds
+static void delay_ms(unsigned long ms)
+{
+    vTaskDelay(pdMS_TO_TICKS(ms));
+}
+
 // ============================================================================
 // Public Interface Functions
 // ============================================================================
@@ -344,6 +392,9 @@ void motor_forward_constant_speed(float speed)
         mpu_data_t orientation = mpu_get_orientation();
         float current_yaw = orientation.yaw;
 
+        // Get ultrasonic readings
+        ultrasonic_readings_t ultrasonic = ultrasonic_get_all();
+
         // Calculate heading error (-180 to 180 degrees)
         float yaw_error = target_yaw - current_yaw;
         while (yaw_error > 180.0f)
@@ -359,18 +410,30 @@ void motor_forward_constant_speed(float speed)
             // Calculate heading correction
             float correction = calculate_heading_correction(yaw_error, dt);
 
-            // Apply correction to motor speeds
-            unsigned long duty_a = base_duty + (unsigned long)(correction * PWM_MAX_DUTY);
-            unsigned long duty_b = base_duty - (unsigned long)(correction * PWM_MAX_DUTY);
+            // Apply correction to motor speeds with constraints
+            float duty_ratio_a = speed + correction;
+            float duty_ratio_b = speed - correction;
+
+            // Clamp duty ratios
+            duty_ratio_a = (duty_ratio_a < MIN_DUTY_RATIO) ? MIN_DUTY_RATIO : (duty_ratio_a > MAX_DUTY_RATIO) ? MAX_DUTY_RATIO
+                                                                                                              : duty_ratio_a;
+            duty_ratio_b = (duty_ratio_b < MIN_DUTY_RATIO) ? MIN_DUTY_RATIO : (duty_ratio_b > MAX_DUTY_RATIO) ? MAX_DUTY_RATIO
+                                                                                                              : duty_ratio_b;
+
+            // Convert to duty cycles
+            unsigned long duty_a = (unsigned long)(duty_ratio_a * PWM_MAX_DUTY);
+            unsigned long duty_b = (unsigned long)(duty_ratio_b * PWM_MAX_DUTY);
 
             // Set motor speeds
             set_motor_speed(duty_a, duty_b);
 
             // Log status periodically
-            if ((current_time - start_time) % 1000 < 50) // Log roughly every second
+            if ((current_time - start_time) % 40 < 20) // Log every 40ms
             {
-                log_remote("Yaw: %.2f°, Error: %.2f°, Correction: %.2f",
-                           current_yaw, yaw_error, correction);
+                log_remote("Yaw: %.2f°, Error: %.2f°, Correction: %.2f, Left: %.1fcm, Right: %.1fcm, Duty A: %lu, Duty B: %lu",
+                           current_yaw, yaw_error, correction,
+                           ultrasonic.left, ultrasonic.right,
+                           duty_a, duty_b);
             }
 
             last_pid_update = new_time;
@@ -543,4 +606,5 @@ void motor_turn_90(bool turn_right)
 
     // Stop motors
     motor_stop();
+    delay_ms(1000);
 }

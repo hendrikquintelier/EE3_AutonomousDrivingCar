@@ -20,6 +20,7 @@ extern "C"
 
     /**
      * @brief Returns all three distances in a single call.
+     * @return ultrasonic_readings_t containing left, front, and right distances in centimeters
      */
     ultrasonic_readings_t ultrasonic_get_all(void);
 

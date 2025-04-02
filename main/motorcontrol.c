@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <math.h>
+#include "esp_mac.h"
 
 // ============================================================================
 // Hardware Configuration
@@ -36,16 +37,16 @@
 // ============================================================================
 // PID Control Parameters
 // ============================================================================
-#define PID_KP 0.02f         // Further reduced for gentler response
-#define PID_KI 0.0002f       // Reduced integral action
-#define PID_KD 0.00015f      // Increased derivative gain for better damping
-#define PID_I_MAX 0.03f      // Reduced integral windup limit
-#define PID_UPDATE_MS 10     // Reduced update interval for more responsive control
-#define DRIVE_TIME_MS 5000   // Total drive time (10 seconds)
-#define PID_DEADZONE 1.0f    // Increased deadzone to prevent small oscillations
-#define MAX_CORRECTION 0.15f // Reduced maximum correction to 15% of base speed
-#define MIN_DUTY_RATIO 0.4f  // Increased minimum duty ratio to 40%
-#define MAX_DUTY_RATIO 0.6f  // Reduced maximum duty ratio to 60%
+#define PID_KP 0.03f        // Further reduced for gentler response
+#define PID_KI 0.0002f      // Reduced integral action
+#define PID_KD 0.0003f      // Increased derivative gain for better damping
+#define PID_I_MAX 0.03f     // Reduced integral windup limit
+#define PID_UPDATE_MS 10    // Reduced update interval for more responsive control
+#define DRIVE_TIME_MS 5000  // Total drive time (10 seconds)
+#define PID_DEADZONE 0.5f   // Reduced deadzone to 0.5 degrees for more precise control
+#define MAX_CORRECTION 0.3f // Reduced maximum correction to 15% of base speed
+#define MIN_DUTY_RATIO 0.4f // Increased minimum duty ratio to 40%
+#define MAX_DUTY_RATIO 0.9f // Set maximum duty ratio to 90% of PWM_MAX_DUTY
 
 // Add these defines at the top with other defines
 #define TURN_PID_KP 0.3f            // Higher proportional gain for faster response
@@ -66,6 +67,7 @@
 #define MOMENTUM_SPEED 0.3f         // Increased from 0.2f to 0.3f (60% power)
 #define ANGULAR_VEL_THRESHOLD 50.0f // Degrees/second threshold for overshoot prediction
 #define BRAKE_FORCE 0.6f            // Increased from 0.4f to 0.6f (60% power)
+#define MAX_DERIVATIVE 100.0f       // Maximum derivative term for rate limiting
 
 // ============================================================================
 // State Variables
@@ -83,6 +85,29 @@ motor_calibration_t motor_calibration = {
     .left_factor = 1.0f,
     .right_factor = 1.0f,
     .is_calibrated = false};
+
+// Add these at the top with other state variables
+static struct
+{
+    float yaw;
+    float error;
+    float correction;
+    float left_dist;
+    float right_dist;
+    float distance;
+    unsigned long duty_a;
+    unsigned long duty_b;
+    bool new_data;
+} log_data = {0};
+
+// Add this structure near the top with other state variables
+static struct
+{
+    float left;
+    float right;
+    bool new_data;
+    SemaphoreHandle_t mutex;
+} ultrasonic_cache = {0};
 
 // ============================================================================
 // Helper Functions
@@ -158,6 +183,12 @@ static void stop_motors(void)
 
 static float calculate_heading_correction(float error, float dt)
 {
+    // Prevent division by zero or very small dt
+    if (dt < 0.001f) // Less than 1ms
+    {
+        dt = 0.001f;
+    }
+
     // Apply deadzone to prevent small oscillations
     if (fabs(error) < PID_DEADZONE)
     {
@@ -167,45 +198,26 @@ static float calculate_heading_correction(float error, float dt)
 
     // Update integral with anti-windup
     yaw_integral += error * dt;
-    yaw_integral = (yaw_integral > PID_I_MAX) ? PID_I_MAX : (yaw_integral < -PID_I_MAX) ? -PID_I_MAX
-                                                                                        : yaw_integral;
+    if (yaw_integral > PID_I_MAX)
+        yaw_integral = PID_I_MAX;
+    else if (yaw_integral < -PID_I_MAX)
+        yaw_integral = -PID_I_MAX;
 
-    // Calculate derivative with low-pass filter
+    // Calculate derivative term with rate limiting
     float derivative = (error - last_yaw_error) / dt;
+    if (derivative > MAX_DERIVATIVE)
+        derivative = MAX_DERIVATIVE;
+    else if (derivative < -MAX_DERIVATIVE)
+        derivative = -MAX_DERIVATIVE;
+
+    // Calculate PID output
+    float output = PID_KP * error + PID_KI * yaw_integral + PID_KD * derivative;
+
+    // Store error for next iteration
     last_yaw_error = error;
 
-    // Apply exponential smoothing to derivative to reduce noise
-    static float smoothed_derivative = 0;
-    float alpha = 0.3f; // Smoothing factor
-    smoothed_derivative = alpha * derivative + (1 - alpha) * smoothed_derivative;
-
-    // Apply PID control with derivative smoothing
-    float correction = PID_KP * error + PID_KI * yaw_integral + PID_KD * smoothed_derivative;
-
-    // Scale correction based on error magnitude
-    float error_scale = 1.0f;
-    if (fabs(error) > 10.0f)
-    {
-        error_scale = 0.8f; // Reduce correction for large errors
-    }
-    else if (fabs(error) < 5.0f)
-    {
-        error_scale = 0.6f; // Further reduce correction for small errors
-    }
-
-    correction *= error_scale;
-
-    // Limit maximum correction
-    if (correction > MAX_CORRECTION)
-    {
-        correction = MAX_CORRECTION;
-    }
-    else if (correction < -MAX_CORRECTION)
-    {
-        correction = -MAX_CORRECTION;
-    }
-
-    return correction;
+    // Return the correction
+    return output;
 }
 
 static float calculate_turn_correction(float error, float dt)
@@ -318,6 +330,81 @@ static void delay_ms(unsigned long ms)
     vTaskDelay(pdMS_TO_TICKS(ms));
 }
 
+// Add this function before log_task
+static void ultrasonic_task(void *pvParameters)
+{
+    while (1)
+    {
+        // Get ultrasonic readings
+        ultrasonic_readings_t ultrasonic = ultrasonic_get_all();
+
+        // Update cache with mutex protection
+        if (xSemaphoreTake(ultrasonic_cache.mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+        {
+            ultrasonic_cache.left = ultrasonic.left;
+            ultrasonic_cache.right = ultrasonic.right;
+            ultrasonic_cache.new_data = true;
+            xSemaphoreGive(ultrasonic_cache.mutex);
+        }
+
+        // Wait 500ms before next reading
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+// Modify log_task to use cached ultrasonic values
+static void log_task(void *pvParameters)
+{
+    unsigned long last_log_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    unsigned long log_count = 0;
+    unsigned long last_rate_time = last_log_time;
+    unsigned long last_status_time = last_log_time;
+
+    while (1)
+    {
+        if (log_data.new_data)
+        {
+            unsigned long current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            unsigned long time_since_last = current_time - last_log_time;
+
+            // Only log if enough time has passed
+            if (time_since_last >= 100) // 10Hz target
+            {
+                // Get cached ultrasonic readings
+                if (xSemaphoreTake(ultrasonic_cache.mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+                {
+                    log_data.left_dist = ultrasonic_cache.left;
+                    log_data.right_dist = ultrasonic_cache.right;
+                    xSemaphoreGive(ultrasonic_cache.mutex);
+                }
+
+                log_data.distance = mpu_get_filtered_frontal_distance();
+
+                // Log status data
+                log_remote("Yaw: %.2f°, Error: %.2f°, Correction: %.2f, Left: %.1fcm, Right: %.1fcm, Distance: %.1fcm, Duty A: %lu, Duty B: %lu",
+                           log_data.yaw, log_data.error, log_data.correction,
+                           log_data.left_dist, log_data.right_dist,
+                           log_data.distance,
+                           log_data.duty_a, log_data.duty_b);
+
+                last_log_time = current_time;
+                log_count++;
+
+                // Calculate and log rate every second
+                if (current_time - last_rate_time >= 1000)
+                {
+                    float rate = (float)log_count * 1000.0f / (current_time - last_rate_time);
+                    log_remote("Logging rate: %.1f Hz, Time since last: %lu ms", rate, time_since_last);
+                    log_count = 0;
+                    last_rate_time = current_time;
+                }
+            }
+            log_data.new_data = false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1)); // Minimal delay to prevent watchdog issues
+    }
+}
+
 // ============================================================================
 // Public Interface Functions
 // ============================================================================
@@ -374,10 +461,20 @@ void motor_forward_constant_speed(float speed)
     speed = (speed < 0.0f) ? 0.0f : (speed > 1.0f) ? 1.0f
                                                    : speed;
 
+    // Create mutex for ultrasonic cache
+    ultrasonic_cache.mutex = xSemaphoreCreateMutex();
+
+    // Create tasks
+    TaskHandle_t log_task_handle;
+    TaskHandle_t ultrasonic_task_handle;
+    xTaskCreate(log_task, "log_task", 4096, NULL, 1, &log_task_handle);
+    xTaskCreate(ultrasonic_task, "ultrasonic_task", 4096, NULL, 1, &ultrasonic_task_handle);
+
     // Initialize drive parameters
     unsigned long start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
     unsigned long current_time = start_time;
-    target_yaw = mpu_get_orientation().yaw; // Get initial heading
+    target_yaw = mpu_get_orientation().yaw;
+    mpu_reset_movement();
     log_remote("Starting straight drive at %.0f%% speed, target yaw: %.2f°", speed * 100, target_yaw);
 
     // Set up motors for forward motion
@@ -386,14 +483,16 @@ void motor_forward_constant_speed(float speed)
     set_motor_speed(base_duty, base_duty);
 
     // Main drive loop
+    unsigned long last_loop_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    unsigned long loop_count = 0;
+    unsigned long last_diag_time = last_loop_time;
+    unsigned long last_mpu_time = last_loop_time;
+
     while (current_time - start_time < DRIVE_TIME_MS)
     {
         // Get current orientation
         mpu_data_t orientation = mpu_get_orientation();
         float current_yaw = orientation.yaw;
-
-        // Get ultrasonic readings
-        ultrasonic_readings_t ultrasonic = ultrasonic_get_all();
 
         // Calculate heading error (-180 to 180 degrees)
         float yaw_error = target_yaw - current_yaw;
@@ -405,48 +504,69 @@ void motor_forward_constant_speed(float speed)
         // Update PID control
         unsigned long new_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
         float dt = (new_time - last_pid_update) / 1000.0f;
-        if (dt >= PID_UPDATE_MS / 1000.0f)
-        {
-            // Calculate heading correction
-            float correction = calculate_heading_correction(yaw_error, dt);
+        last_pid_update = new_time;
 
-            // Apply correction to motor speeds with constraints
-            float duty_ratio_a = speed + correction;
-            float duty_ratio_b = speed - correction;
+        // Calculate heading correction
+        float correction = calculate_heading_correction(yaw_error, dt);
 
-            // Clamp duty ratios
-            duty_ratio_a = (duty_ratio_a < MIN_DUTY_RATIO) ? MIN_DUTY_RATIO : (duty_ratio_a > MAX_DUTY_RATIO) ? MAX_DUTY_RATIO
-                                                                                                              : duty_ratio_a;
-            duty_ratio_b = (duty_ratio_b < MIN_DUTY_RATIO) ? MIN_DUTY_RATIO : (duty_ratio_b > MAX_DUTY_RATIO) ? MAX_DUTY_RATIO
-                                                                                                              : duty_ratio_b;
+        // Apply correction to motor speeds with constraints
+        float duty_ratio_a = speed + correction;
+        float duty_ratio_b = speed - correction;
 
-            // Convert to duty cycles
-            unsigned long duty_a = (unsigned long)(duty_ratio_a * PWM_MAX_DUTY);
-            unsigned long duty_b = (unsigned long)(duty_ratio_b * PWM_MAX_DUTY);
+        // Clamp duty ratios
+        duty_ratio_a = (duty_ratio_a < MIN_DUTY_RATIO) ? MIN_DUTY_RATIO : (duty_ratio_a > MAX_DUTY_RATIO) ? MAX_DUTY_RATIO
+                                                                                                          : duty_ratio_a;
+        duty_ratio_b = (duty_ratio_b < MIN_DUTY_RATIO) ? MIN_DUTY_RATIO : (duty_ratio_b > MAX_DUTY_RATIO) ? MAX_DUTY_RATIO
+                                                                                                          : duty_ratio_b;
 
-            // Set motor speeds
-            set_motor_speed(duty_a, duty_b);
+        // Convert to duty cycles (ensure proper rounding and range)
+        unsigned long duty_a = (unsigned long)(duty_ratio_a * PWM_MAX_DUTY + 0.5f);
+        unsigned long duty_b = (unsigned long)(duty_ratio_b * PWM_MAX_DUTY + 0.5f);
 
-            // Log status periodically
-            if ((current_time - start_time) % 40 < 20) // Log every 40ms
-            {
-                log_remote("Yaw: %.2f°, Error: %.2f°, Correction: %.2f, Left: %.1fcm, Right: %.1fcm, Duty A: %lu, Duty B: %lu",
-                           current_yaw, yaw_error, correction,
-                           ultrasonic.left, ultrasonic.right,
-                           duty_a, duty_b);
-            }
+        // Ensure duty cycles don't exceed maximum
+        duty_a = (duty_a > PWM_MAX_DUTY) ? PWM_MAX_DUTY : duty_a;
+        duty_b = (duty_b > PWM_MAX_DUTY) ? PWM_MAX_DUTY : duty_b;
 
-            last_pid_update = new_time;
-        }
+        // Set motor speeds with different duty cycles for correction
+        set_motor_speed(duty_a, duty_b);
 
-        // Update time and delay
+        // Update log data without waiting
+        log_data.yaw = current_yaw;
+        log_data.error = yaw_error;
+        log_data.correction = correction;
+        log_data.duty_a = duty_a;
+        log_data.duty_b = duty_b;
+        log_data.new_data = true;
+
+        // Update time and minimal delay
         current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // Calculate and log loop timing every second
+        loop_count++;
+        if (current_time - last_diag_time >= 1000)
+        {
+            float loop_rate = (float)loop_count * 1000.0f / (current_time - last_diag_time);
+            float loop_time = (float)(current_time - last_loop_time);
+            float mpu_time = (float)(current_time - last_mpu_time);
+            log_remote("Control loop: %.1f Hz, Loop time: %.1f ms, MPU time: %.1f ms",
+                       loop_rate, loop_time, mpu_time);
+            loop_count = 0;
+            last_diag_time = current_time;
+        }
+        last_loop_time = current_time;
+        last_mpu_time = current_time;
+
+        vTaskDelay(pdMS_TO_TICKS(1)); // Minimal delay to prevent watchdog issues
     }
 
     // Drive complete
     log_remote("Drive time elapsed, stopping motors...");
     motor_stop();
+
+    // Delete both tasks
+    vTaskDelete(log_task_handle);
+    vTaskDelete(ultrasonic_task_handle);
+    vSemaphoreDelete(ultrasonic_cache.mutex);
 }
 
 void motor_stop(void)

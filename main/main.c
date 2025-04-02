@@ -15,7 +15,7 @@
 #include "motorcontrol.h"
 #include "ultrasonic.h"
 
-#define MOTOR_SPEED 0.6f // 70% speed
+#define MOTOR_SPEED 0.7f // 70% speed
 
 // ============================================================================
 // Main Entry Point

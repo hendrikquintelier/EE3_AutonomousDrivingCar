@@ -22,6 +22,7 @@
 #define MAX_DISTANCE 400.0f    // Maximum valid distance (cm)
 #define MIN_ECHO_TIME 100      // Minimum echo time in microseconds (2cm)
 #define MAX_ECHO_TIME 23270    // Maximum echo time in microseconds (400cm)
+#define NUM_SAMPLES 3          // Number of samples to average
 
 static void init_ultrasonic_sensor(gpio_num_t trig_pin, gpio_num_t echo_pin);
 static float measure_distance(gpio_num_t trig_pin, gpio_num_t echo_pin);
@@ -64,57 +65,72 @@ static void delay_us(uint32_t us)
 
 static float measure_distance(gpio_num_t trig_pin, gpio_num_t echo_pin)
 {
-    uint64_t start_time = 0, end_time = 0;
-    uint32_t wait_time = 0;
+    float sum_distance = 0.0f;
+    int valid_samples = 0;
 
-    // 1. Send 10µs pulse
-    gpio_set_level(trig_pin, 1);
-    delay_us(TRIG_PULSE_US);
-    gpio_set_level(trig_pin, 0);
-
-    // 2. Wait for ECHO to go HIGH with timeout
-    wait_time = 0;
-    while (gpio_get_level(echo_pin) == 0 && wait_time < MAX_WAIT_US)
+    // Take multiple samples and average them
+    for (int i = 0; i < NUM_SAMPLES; i++)
     {
-        delay_us(1);
-        wait_time++;
+        uint64_t start_time = 0, end_time = 0;
+        uint32_t wait_time = 0;
+
+        // 1. Send 10µs pulse
+        gpio_set_level(trig_pin, 1);
+        delay_us(TRIG_PULSE_US);
+        gpio_set_level(trig_pin, 0);
+
+        // 2. Wait for ECHO to go HIGH with timeout
+        wait_time = 0;
+        while (gpio_get_level(echo_pin) == 0 && wait_time < MAX_WAIT_US)
+        {
+            delay_us(1);
+            wait_time++;
+        }
+        if (wait_time >= MAX_WAIT_US)
+        {
+            continue; // Skip this sample
+        }
+        start_time = esp_timer_get_time();
+
+        // 3. Wait for ECHO to go LOW with timeout
+        wait_time = 0;
+        while (gpio_get_level(echo_pin) == 1 && wait_time < MAX_WAIT_US)
+        {
+            delay_us(1);
+            wait_time++;
+        }
+        if (wait_time >= MAX_WAIT_US)
+        {
+            continue; // Skip this sample
+        }
+        end_time = esp_timer_get_time();
+
+        // 4. Calculate duration and validate timing
+        float duration_us = (float)(end_time - start_time);
+
+        // Validate echo duration is within expected range
+        if (duration_us < MIN_ECHO_TIME || duration_us > MAX_ECHO_TIME)
+        {
+            continue; // Skip this sample
+        }
+
+        // 5. Calculate distance with improved precision
+        float distance_cm = (duration_us * SPEED_OF_SOUND) / 2.0f;
+
+        // 6. Validate final distance
+        if (distance_cm < MIN_DISTANCE || distance_cm > MAX_DISTANCE)
+        {
+            continue; // Skip this sample
+        }
+
+        sum_distance += distance_cm;
+        valid_samples++;
     }
-    if (wait_time >= MAX_WAIT_US)
+
+    // Return average of valid samples, or -1 if no valid samples
+    if (valid_samples > 0)
     {
-        return -1.0f; // No echo received
+        return sum_distance / valid_samples;
     }
-    start_time = esp_timer_get_time();
-
-    // 3. Wait for ECHO to go LOW with timeout
-    wait_time = 0;
-    while (gpio_get_level(echo_pin) == 1 && wait_time < MAX_WAIT_US)
-    {
-        delay_us(1);
-        wait_time++;
-    }
-    if (wait_time >= MAX_WAIT_US)
-    {
-        return -1.0f; // Echo never went low
-    }
-    end_time = esp_timer_get_time();
-
-    // 4. Calculate duration and validate timing
-    float duration_us = (float)(end_time - start_time);
-
-    // Validate echo duration is within expected range
-    if (duration_us < MIN_ECHO_TIME || duration_us > MAX_ECHO_TIME)
-    {
-        return -1.0f; // Invalid echo duration
-    }
-
-    // 5. Calculate distance with improved precision
-    float distance_cm = (duration_us * SPEED_OF_SOUND) / 2.0f;
-
-    // 6. Validate final distance
-    if (distance_cm < MIN_DISTANCE || distance_cm > MAX_DISTANCE)
-    {
-        return -1.0f; // Invalid distance
-    }
-
-    return distance_cm;
+    return -1.0f;
 }

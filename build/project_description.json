@@ -1,7 +1,7 @@
 {
     "version":            "1.1",
     "project_name":       "EE3_AutonomousDrivingCar",
-    "project_version":    "c74aa6e-dirty",
+    "project_version":    "6db4667-dirty",
     "project_path":       "C:/Workspace/EE3/EE3_AutonomousDrivingCar",
     "idf_path":           "C:/Users/Hendrik Quintelier/esp/v5.4/esp-idf",
     "build_dir":          "C:/Workspace/EE3/EE3_AutonomousDrivingCar/build",

@@ -39,11 +39,11 @@
 // ============================================================================
 #define PID_KP 0.03f        // Further reduced for gentler response
 #define PID_KI 0.0002f      // Reduced integral action
-#define PID_KD 0.0003f      // Increased derivative gain for better damping
+#define PID_KD 0.00035f     // Increased derivative gain for better damping
 #define PID_I_MAX 0.03f     // Reduced integral windup limit
 #define PID_UPDATE_MS 10    // Reduced update interval for more responsive control
 #define DRIVE_TIME_MS 5000  // Total drive time (10 seconds)
-#define PID_DEADZONE 0.5f   // Reduced deadzone to 0.5 degrees for more precise control
+#define PID_DEADZONE 0.25f  // Reduced deadzone to 0.5 degrees for more precise control
 #define MAX_CORRECTION 0.3f // Reduced maximum correction to 15% of base speed
 #define MIN_DUTY_RATIO 0.4f // Increased minimum duty ratio to 40%
 #define MAX_DUTY_RATIO 0.9f // Set maximum duty ratio to 90% of PWM_MAX_DUTY

@@ -4,6 +4,7 @@
 #include "wifi_logger.h"
 #include "mpu.h"
 #include "ultrasonic.h"
+#include "encoder.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -37,16 +38,16 @@
 // ============================================================================
 // PID Control Parameters
 // ============================================================================
-#define PID_KP 0.03f        // Further reduced for gentler response
-#define PID_KI 0.0002f      // Reduced integral action
-#define PID_KD 0.00035f     // Increased derivative gain for better damping
-#define PID_I_MAX 0.03f     // Reduced integral windup limit
-#define PID_UPDATE_MS 10    // Reduced update interval for more responsive control
-#define DRIVE_TIME_MS 5000  // Total drive time (10 seconds)
-#define PID_DEADZONE 0.25f  // Reduced deadzone to 0.5 degrees for more precise control
-#define MAX_CORRECTION 0.3f // Reduced maximum correction to 15% of base speed
-#define MIN_DUTY_RATIO 0.4f // Increased minimum duty ratio to 40%
-#define MAX_DUTY_RATIO 0.9f // Set maximum duty ratio to 90% of PWM_MAX_DUTY
+#define PID_KP 0.03f         // Further reduced for gentler response
+#define PID_KI 0.0002f       // Reduced integral action
+#define PID_KD 0.00035f      // Increased derivative gain for better damping
+#define PID_I_MAX 0.03f      // Reduced integral windup limit
+#define PID_UPDATE_MS 10     // Reduced update interval for more responsive control
+#define DRIVE_TIME_MS 5000   // Total drive time (10 seconds)
+#define PID_DEADZONE 0.25f   // Reduced deadzone to 0.5 degrees for more precise control
+#define MAX_CORRECTION 0.3f  // Reduced maximum correction to 15% of base speed
+#define MIN_DUTY_RATIO 0.05f // Increased minimum duty ratio to 40%
+#define MAX_DUTY_RATIO 0.9f  // Set maximum duty ratio to 90% of PWM_MAX_DUTY
 
 // Add these defines at the top with other defines
 #define TURN_PID_KP 0.3f            // Higher proportional gain for faster response
@@ -152,14 +153,29 @@ static void set_motor_turn(bool turn_right)
     }
 }
 
-static void set_motor_speed(unsigned long duty_a, unsigned long duty_b)
+static void set_motor_speed(long duty_a, long duty_b)
 {
-    // Ensure minimum force on both motors
-    unsigned long min_duty = (unsigned long)(MIN_MOTOR_FORCE * PWM_MAX_DUTY);
+    // Handle negative duties by inverting direction
+    bool motor_a_forward = true;
+    bool motor_b_forward = true;
 
-    // Apply minimum force to both motors
-    duty_a = (duty_a < min_duty) ? min_duty : duty_a;
-    duty_b = (duty_b < min_duty) ? min_duty : duty_b;
+    // Convert signed duties to absolute values and set direction
+    if (duty_a < 0)
+    {
+        motor_a_forward = false;
+        duty_a = -duty_a;
+    }
+    if (duty_b < 0)
+    {
+        motor_b_forward = false;
+        duty_b = -duty_b;
+    }
+
+    // Set motor directions
+    gpio_set_level(MOTOR_A_IN1, motor_a_forward ? 1 : 0);
+    gpio_set_level(MOTOR_A_IN2, motor_a_forward ? 0 : 1);
+    gpio_set_level(MOTOR_B_IN1, motor_b_forward ? 1 : 0);
+    gpio_set_level(MOTOR_B_IN2, motor_b_forward ? 0 : 1);
 
     // Clamp duties to valid range
     duty_a = (duty_a > PWM_MAX_DUTY) ? PWM_MAX_DUTY : duty_a;
@@ -727,4 +743,144 @@ void motor_turn_90(bool turn_right)
     // Stop motors
     motor_stop();
     delay_ms(1000);
+}
+
+/**
+ * @brief Drive forward until 1 meter is traveled.
+ *
+ * This function resets the encoder counts and then drives forward using a heading
+ * PID (via calculate_heading_correction) to keep the vehicle straight.
+ * The forward speed is not constant – the speed is reduced as the vehicle approaches
+ * the target distance (in centimeters). For a 1-meter drive, call:
+ *     motor_forward_distance(0.65f, 100.0f);
+ *
+ * @param max_speed Maximum speed (as a fraction from 0.0f to 1.0f) to drive at.
+ * @param target_distance_cm Target travel distance in centimeters (e.g., 100.0 for 1 meter).
+ */
+void motor_forward_distance(float max_speed, float target_distance_cm)
+{
+    // Reset the encoder counts so distance measurement starts at 0.
+    encoder_reset();
+    // Reset any movement tracking
+    mpu_reset_movement();
+
+    // Get the initial heading to maintain throughout the drive.
+    target_yaw = mpu_get_orientation().yaw;
+    log_remote("Starting drive for %.1f cm at max speed: %.0f%%, target yaw: %.2f°",
+               target_distance_cm, max_speed * 100.0f, target_yaw);
+
+    // Set up motors for forward motion.
+    set_motor_direction(true);
+    // Start with the maximum speed.
+    unsigned long base_duty = (unsigned long)(max_speed * PWM_MAX_DUTY);
+    set_motor_speed(base_duty, base_duty);
+
+    // Record start time and reset the PID timer.
+    unsigned long start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    unsigned long current_time = start_time;
+    last_pid_update = start_time;
+
+    // Main drive loop – exit when the traveled distance reaches or exceeds the target.
+    while (1)
+    {
+        // Get the current traveled distance from the encoders (in centimeters)
+        float current_distance = encoder_get_distance();
+        if (current_distance >= target_distance_cm)
+        {
+            break;
+        }
+        // Compute the remaining distance.
+        float remaining = target_distance_cm - current_distance;
+
+        // Use a linear deceleration profile starting at 30cm remaining
+        float speed = max_speed;
+        if (remaining < 30.0f) // Start deceleration at 30cm remaining
+        {
+            // Use a linear deceleration curve from max_speed to 0.45 * max_speed
+            float decel_factor = remaining / 30.0f;
+            speed = max_speed * (0.475f + 0.55f * decel_factor);
+
+            // Allow negative speed for braking
+            if (speed < 0.0f)
+            {
+                speed = 0.0f;
+            }
+        }
+
+        // Get current orientation for heading control.
+        mpu_data_t orientation = mpu_get_orientation();
+        float current_yaw = orientation.yaw;
+        // Calculate heading error (wrap between -180° and +180°).
+        float yaw_error = target_yaw - current_yaw;
+        while (yaw_error > 180.0f)
+            yaw_error -= 360.0f;
+        while (yaw_error < -180.0f)
+            yaw_error += 360.0f;
+
+        // Update the PID for heading correction.
+        unsigned long new_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        float dt = (new_time - last_pid_update) / 1000.0f;
+        if (dt < 0.001f)
+        {
+            dt = 0.001f; // prevent extremely small dt
+        }
+        last_pid_update = new_time;
+        float correction = calculate_heading_correction(yaw_error, dt);
+
+        // Apply the correction to the motor speeds.
+        float duty_ratio_a = speed + correction;
+        float duty_ratio_b = speed - correction;
+
+        // Convert ratios to PWM duty cycles.
+        long duty_a = (long)(duty_ratio_a * PWM_MAX_DUTY + 0.5f);
+        long duty_b = (long)(duty_ratio_b * PWM_MAX_DUTY + 0.5f);
+        set_motor_speed(duty_a, duty_b);
+
+        // Log current status.
+        log_remote("Distance: %.2f cm, Remaining: %.2f cm, Yaw: %.2f°, Error: %.2f°, Correction: %.2f, Speed: %.0f%%, Duty A: %ld, Duty B: %ld",
+                   current_distance, remaining, current_yaw, yaw_error, correction, speed * 100.0f, duty_a, duty_b);
+
+        current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        vTaskDelay(pdMS_TO_TICKS(10)); // Delay to allow other tasks to run.
+    }
+
+    // Target distance reached; stop the motors.
+    log_remote("Target distance reached (%.2f cm). Stopping motors.", encoder_get_distance());
+    motor_stop();
+
+    // Continue logging until the car comes to a complete stop
+    bool is_moving = true;
+    float last_distance = encoder_get_distance();
+    unsigned long still_time = 0;
+    const unsigned long STILL_THRESHOLD_MS = 1000; // Consider stopped after 1 second of no movement
+
+    while (is_moving)
+    {
+        float current_distance = encoder_get_distance();
+        float distance_change = fabs(current_distance - last_distance);
+        mpu_data_t orientation = mpu_get_orientation();
+        float current_yaw = orientation.yaw;
+
+        // Log current status
+        log_remote("Coasting - Distance: %.2f cm, Yaw: %.2f°, Distance change: %.2f cm",
+                   current_distance, current_yaw, distance_change);
+
+        if (distance_change < 0.1f) // Less than 1mm change
+        {
+            still_time += 10;
+            if (still_time >= STILL_THRESHOLD_MS)
+            {
+                is_moving = false;
+                log_remote("Car has come to a complete stop. Final distance: %.2f cm, Final yaw: %.2f°",
+                           current_distance, current_yaw);
+            }
+        }
+        else
+        {
+            still_time = 0;
+        }
+
+        last_distance = current_distance;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }

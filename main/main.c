@@ -14,6 +14,7 @@
 #include <float.h>
 #include "motorcontrol.h"
 #include "ultrasonic.h"
+#include "encoder.h"
 
 #define MOTOR_SPEED 0.7f // 70% speed
 
@@ -48,6 +49,10 @@ void app_main(void)
     motor_init();
     printf("Motor initialization complete\n");
 
+    printf("Initializing encoders...\n");
+    encoder_init();
+    printf("Encoder initialization complete\n");
+
     // Wait for MPU to stabilize
     printf("Waiting for MPU to stabilize...\n");
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -61,7 +66,7 @@ void app_main(void)
 
     // Then drive forward
     // log_remote("Starting straight drive test...");
-    motor_forward_constant_speed(MOTOR_SPEED);
+    motor_forward_distance(MOTOR_SPEED, 40.0f);
 
     log_remote("Test complete!");
 }

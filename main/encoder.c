@@ -4,7 +4,6 @@
 #include "freertos/portmacro.h"
 #include "esp_mac.h"
 #include "freertos/task.h"
-#include "driver/pcnt.h"
 #include <stdio.h>
 #include "esp_timer.h"
 #include "wifi_logger.h"
@@ -131,24 +130,6 @@ static void encoder_debug_task(void *pvParameters)
         int32_t current_count1 = encoder_get_count1();
         int32_t current_count2 = encoder_get_count2();
 
-        // Calculate changes
-        int32_t isr1_diff = current_isr1 - last_isr1_count;
-        int32_t isr2_diff = current_isr2 - last_isr2_count;
-        int32_t count1_diff = current_count1 - last_count1;
-        int32_t count2_diff = current_count2 - last_count2;
-
-        // Read current pin states
-        int a1_level = gpio_get_level(ENCODER1_PIN_A);
-        int b1_level = gpio_get_level(ENCODER1_PIN_B);
-        int a2_level = gpio_get_level(ENCODER2_PIN_A);
-        int b2_level = gpio_get_level(ENCODER2_PIN_B);
-
-        // Log debug information
-        // log_remote("Encoder Debug:\n");
-        // log_remote("Encoder1 - ISRs: %ld, Count: %ld, Pins(A,B): (%d,%d)\n",
-        //           isr1_diff, count1_diff, a1_level, b1_level);
-        // log_remote("Encoder2 - ISRs: %ld, Count: %ld, Pins(A,B): (%d,%d)\n",
-        //           isr2_diff, count2_diff, a2_level, b2_level);
 
         // Update last values
         last_isr1_count = current_isr1;

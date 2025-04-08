@@ -5,5 +5,6 @@ idf_component_register(
          "mpu.c"
          "encoder.c"
          "wifi_logger.c"
+         "surroundings.c"
     INCLUDE_DIRS "."
 )

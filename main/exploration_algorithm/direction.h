@@ -9,9 +9,9 @@ typedef struct MapPoint MapPoint;
 
 typedef enum {
     NORTH = 0,
-    EAST = 1,
-    SOUTH = 2,
-    WEST = 3,
+    EAST = 90,
+    SOUTH = 180,
+    WEST = 270,
     INVALID_DIRECTION = -1  // Define an invalid direction
 } Direction;
 

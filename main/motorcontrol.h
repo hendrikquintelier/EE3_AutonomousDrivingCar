@@ -2,13 +2,15 @@
 #define MOTORCONTROL_H
 
 #include <stdbool.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "mpu.h"
+#include "ultrasonic.h"
+#include "encoder.h"
+#include "surroundings.h"
+#include "exploration_algorithm/direction.h"
 
-// Return type for motor_forward_distance to provide error metrics
-typedef struct
-{
-    float heading_error;      // Final heading error in degrees
-    float distance_overshoot; // Distance overshoot in centimeters
-} drive_result_t;
+#define MOTOR_SPEED 0.7f // 70% speed
 
 // Initialize the motor control system
 void motor_init(void);
@@ -16,19 +18,18 @@ void motor_init(void);
 // Drive forward at constant speed with yaw control
 void motor_forward_constant_speed(float speed);
 
-// Turn 90 degrees left or right
-void motor_turn_90(bool turn_right);
+
+
+void motor_turn_to_cardinal(Direction target, float heading_offset);
 
 // Stop all motors
 void motor_stop(void);
 
 // Updated function signature to accept compensation parameters and return results
-drive_result_t motor_forward_distance(float max_speed, float target_distance_cm,
-                                      float heading_compensation, float distance_compensation);
+drive_result_t motor_forward_distance(float heading_compensation, float distance_compensation);
 
-// Helper function declarations
-static void normalize_angle(float *angle);
-static void calibrate_motors(void);
+
+
 
 // Control structures
 typedef struct

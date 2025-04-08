@@ -15,8 +15,14 @@
 #include "motorcontrol.h"
 #include "ultrasonic.h"
 #include "encoder.h"
+#include "surroundings.h"
+#include "exploration_algorithm/direction.h"
 
-#define MOTOR_SPEED 0.7f // 70% speed
+
+
+drive_result_t last_drive_result;
+
+
 
 // ============================================================================
 // Main Entry Point
@@ -58,15 +64,17 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(2000));
     printf("MPU stabilization complete\n");
 
-    // Start driving forward with yaw control
-    log_remote("Starting movement sequence...");
+    log_remote("System initialization complete");
 
-    // First turn 90 degrees right
-    log_remote("Performing 90-degree right turn...");
+    
 
-    // Then drive forward
-    // log_remote("Starting straight drive test...");
-    motor_forward_distance(MOTOR_SPEED, 40.0f);
-
-    log_remote("Test complete!");
+    log_remote("Starting forward drive test (40 cm)");
+    
+    // Drive forward 40 cm with no heading or distance compensation
+    drive_result_t result = motor_forward_distance(0.0f, 0.0f);
+    
+    log_remote("Drive test complete. Final heading error: %.2f°, Distance overshoot: %.2f cm",
+               result.heading, result.forward_distance_overshoot);
+    
+    
 }

@@ -1,6 +1,11 @@
 #ifndef ULTRASONIC_H
 #define ULTRASONIC_H
 
+#include "driver/gpio.h"
+#include "esp_timer.h"
+#include "wifi_logger.h"
+#include <string.h>
+
 #ifdef __cplusplus
 extern "C"
 {

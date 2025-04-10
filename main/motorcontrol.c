@@ -20,44 +20,47 @@
 // ============================================================================
 // Hardware Configuration
 // ============================================================================
-#define MOTOR_A_IN1 37 // Direction pin 1
-#define MOTOR_A_IN2 48 // Direction pin 2
-#define MOTOR_A_EN 38  // Enable pin (PWM)
+// Motor A pins (Right motor)
+#define MOTOR_A_IN1 37  // Input 1
+#define MOTOR_A_IN2 48  // Input 2
+#define MOTOR_A_EN 38   // Enable 1,2
 
-#define MOTOR_B_IN1 35 // Direction pin 1
-#define MOTOR_B_IN2 36 // Direction pin 2
-#define MOTOR_B_EN 45  // Enable pin (PWM)
+// Motor B pins (Left motor)
+#define MOTOR_B_IN1 35  // Input 3
+#define MOTOR_B_IN2 36  // Input 4
+#define MOTOR_B_EN 45   // Enable 3,4
 
+// PWM Configuration
 #define PWM_CHANNEL_A LEDC_CHANNEL_0
 #define PWM_CHANNEL_B LEDC_CHANNEL_1
 #define PWM_MODE LEDC_LOW_SPEED_MODE
 #define PWM_RESOLUTION 13
 #define PWM_FREQ 5000
-#define PWM_MAX_DUTY ((1 << PWM_RESOLUTION) - 1)
+#define PWM_MAX_DUTY ((1 << PWM_RESOLUTION) - 1) // Maximum PWM duty cycle value (8191 for 13-bit)
 
 // ============================================================================
 // PID Control Parameters
 // ============================================================================
-#define PID_KP 0.03f
-#define PID_KI 0.0002f
-#define PID_KD 0.00035f
-#define PID_I_MAX 0.03f
-#define PID_UPDATE_MS 10     
-#define DRIVE_TIME_MS 5000   
-#define PID_DEADZONE 0.25f   
-#define MAX_CORRECTION 0.3f  
-#define MIN_DUTY_RATIO 0.05f 
-#define MAX_DUTY_RATIO 0.9f  
+#define PID_KP 0.03f         // Further reduced for gentler response
+#define PID_KI 0.0002f       // Reduced integral action
+#define PID_KD 0.00035f      // Increased derivative gain for better damping
+#define PID_I_MAX 0.03f      // Reduced integral windup limit
+#define PID_UPDATE_MS 10     // Reduced update interval for more responsive control
+#define DRIVE_TIME_MS 5000   // Total drive time (10 seconds)
+#define PID_DEADZONE 0.25f   // Reduced deadzone to 0.5 degrees for more precise control
+
+// ============================================================================
+// Turn Control Parameters
+// ============================================================================
+#define TURN_SPEED 0.65f     // Speed for turning
+#define TURN_TOLERANCE 2.0f  // Tolerance for turn completion
+#define MIN_TURN_TIME_MS 300 // Minimum time for a turn
 
 // Additional parameters for turning and calibration (not used directly in this function)
 #define TURN_PID_KP 0.3f            
 #define TURN_PID_KI 0.01f          
 #define TURN_PID_KD 0.05f         
 #define TURN_PID_I_MAX 0.5f       
-#define TURN_SPEED 0.65f            
-#define TURN_TOLERANCE 2.0f         
-#define TURN_TIMEOUT_MS 3000        
-#define MIN_TURN_TIME_MS 300        
 #define CALIBRATION_SPEED 0.3f      
 #define CALIBRATION_TIME_MS 2000    
 #define MIN_MOTOR_FORCE 0.4f        
@@ -208,6 +211,10 @@ static void set_motor_speed(long duty_a, long duty_b)
     ledc_update_duty(PWM_MODE, PWM_CHANNEL_A);
     ledc_set_duty(PWM_MODE, PWM_CHANNEL_B, duty_b);
     ledc_update_duty(PWM_MODE, PWM_CHANNEL_B);
+
+    log_remote("Motor speeds set - Left: %ld (%.1f%%, %s), Right: %ld (%.1f%%, %s)", 
+               duty_a, (float)duty_a/PWM_MAX_DUTY*100.0f, motor_a_forward ? "FORWARD" : "BACKWARD",
+               duty_b, (float)duty_b/PWM_MAX_DUTY*100.0f, motor_b_forward ? "FORWARD" : "BACKWARD");
 }
 
 static void stop_motors(void)
@@ -407,3 +414,369 @@ drive_result_t motor_forward_distance(float heading_compensation, float distance
     
     return result;
 }
+
+/**
+ * @brief Rotate the car to a specified direction with a heading offset.
+ *
+ * The function rotates the car to the target base direction (e.g., north: 0°, east: 90°, etc.)
+ * while applying a heading offset. The desired heading is computed as:
+ *     desired_heading = normalize_angle(target_direction + heading_offset)
+ * This means if you specify target_direction=0 (north) and heading_offset=-10, the car will try to
+ * achieve a heading of 350° (which is equivalent to -10°).
+ *
+ * The turning uses its own PID controller (with TURN_PID_* constants) to command the motors in a
+ * tank-turn configuration (one motor forward, the other in reverse). The function runs until the error
+ * is within TURN_TOLERANCE or a timeout occurs.
+ *
+ * @param target_direction The base target direction in degrees (e.g., 0, 90, 180, or 270).
+ * @param heading_offset The offset in degrees to add (or subtract) from the base target.
+ * @return drive_result_t Structure containing the final heading error and sensor data.
+ */
+static float calculate_turn_correction(float error, float dt) {
+    static float turn_integral = 0.0f;
+    static float last_turn_error = 0.0f;
+    
+    if (dt < 0.001f)
+        dt = 0.001f;
+    
+    if (fabs(error) < TURN_DEADZONE) {
+        error = 0;
+        turn_integral = 0;
+    }
+    
+    turn_integral += error * dt;
+    if (turn_integral > TURN_PID_I_MAX)
+        turn_integral = TURN_PID_I_MAX;
+    else if (turn_integral < -TURN_PID_I_MAX)
+        turn_integral = -TURN_PID_I_MAX;
+    
+    float derivative = (error - last_turn_error) / dt;
+    float output = TURN_PID_KP * error + TURN_PID_KI * turn_integral + TURN_PID_KD * derivative;
+    last_turn_error = error;
+    return output;
+}
+
+drive_result_t motor_rotate_to_direction(float target_direction, float heading_offset) {
+    drive_result_t result;
+    const float LEFT_MOTOR_COMPENSATION = 1.2f;  // Compensation factor for left motor's lower torque
+    
+    // Compute the desired final heading (normalized to [0,360))
+    float desired_heading = normalize_angle(target_direction + heading_offset);
+    log_remote("Rotating to direction: %.2f° (base: %.2f° with offset %.2f°)", desired_heading, target_direction, heading_offset);
+    
+    // Stop motors before starting the turn
+    motor_stop();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    unsigned long start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    unsigned long current_time = start_time;
+    last_pid_update = start_time;
+    
+    const unsigned long STABLE_TIME_REQUIRED_MS = 300;
+    unsigned long within_tolerance_time = 0;
+    
+    while (true) {
+        current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        if (current_time - start_time > TURN_TIMEOUT_MS) {
+            log_remote("Turn timed out after %lu ms", current_time - start_time);
+            break;
+        }
+        
+        float current_heading = mpu_get_orientation().yaw;
+        float error = calculate_yaw_error(desired_heading, current_heading);
+        
+        if (fabs(error) < TURN_TOLERANCE) {
+            within_tolerance_time += 10;
+            if (within_tolerance_time >= STABLE_TIME_REQUIRED_MS) {
+                log_remote("Desired heading reached: current heading %.2f° within tolerance %.2f°", current_heading, TURN_TOLERANCE);
+                break;
+            }
+        } else {
+            within_tolerance_time = 0;
+        }
+        
+        float dt = (current_time - last_pid_update) / 1000.0f;
+        if (dt < 0.001f) dt = 0.001f;
+        last_pid_update = current_time;
+        
+        float pid_output = calculate_turn_correction(error, dt);
+        float base_turn_duty = TURN_SPEED * PWM_MAX_DUTY;
+        // Scale the PID correction relative to the PWM duty cycle
+        float turn_command = base_turn_duty + (pid_output * PWM_MAX_DUTY / 180.0f);
+        
+        if (turn_command > MAX_DUTY_RATIO * PWM_MAX_DUTY)
+            turn_command = MAX_DUTY_RATIO * PWM_MAX_DUTY;
+        if (turn_command < MIN_DUTY_RATIO * PWM_MAX_DUTY)
+            turn_command = MIN_DUTY_RATIO * PWM_MAX_DUTY;
+        
+        // Determine turn direction and apply left motor compensation
+        int direction = (error >= 0) ? 1 : -1;
+        long right_duty = (long)(-turn_command * direction);
+        long left_duty = (long)(turn_command * direction * LEFT_MOTOR_COMPENSATION);  // Apply compensation to left motor
+        
+        set_motor_speed(right_duty, left_duty);
+        
+        log_remote("Turning: Current=%.2f°, Target=%.2f°, Error=%.2f°, PID=%.2f, Right=%ld, Left=%ld (compensated)", 
+                    current_heading, desired_heading, error, pid_output, right_duty, left_duty);
+        
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    
+    motor_stop();
+    
+    float final_heading = mpu_get_orientation().yaw;
+    float final_error = calculate_yaw_error(desired_heading, final_heading);
+    result.heading = final_error;
+    result.ultrasonic = ultrasonic_get_all();
+    
+    log_remote("Rotation complete: Final heading = %.2f°, Final error = %.2f°", final_heading, final_error);
+    
+    return result;
+}
+
+void motor_set_direction(int motor, int direction)
+{
+    if (motor == MOTOR_RIGHT) {
+        if (direction == MOTOR_FORWARD) {
+            gpio_set_level(MOTOR_A_IN1, 1);  // Input 1 HIGH
+            gpio_set_level(MOTOR_A_IN2, 0);  // Input 2 LOW
+            log_remote("Right motor set to FORWARD (IN1=1, IN2=0)");
+        } else {
+            gpio_set_level(MOTOR_A_IN1, 0);  // Input 1 LOW
+            gpio_set_level(MOTOR_A_IN2, 1);  // Input 2 HIGH
+            log_remote("Right motor set to BACKWARD (IN1=0, IN2=1)");
+        }
+    } else {
+        if (direction == MOTOR_FORWARD) {
+            gpio_set_level(MOTOR_B_IN1, 1);  // Input 3 HIGH
+            gpio_set_level(MOTOR_B_IN2, 0);  // Input 4 LOW
+            log_remote("Left motor set to FORWARD (IN1=1, IN2=0)");
+        } else {
+            gpio_set_level(MOTOR_B_IN1, 0);  // Input 3 LOW
+            gpio_set_level(MOTOR_B_IN2, 1);  // Input 4 HIGH
+            log_remote("Left motor set to BACKWARD (IN1=0, IN2=1)");
+        }
+    }
+}
+
+void set_motor_turn(bool turn_right)
+{
+    if (turn_right) {
+        // Right turn: right motor backward, left motor forward
+        log_remote("Setting RIGHT turn: Right motor backward, Left motor forward");
+        motor_set_direction(MOTOR_RIGHT, MOTOR_BACKWARD);
+        motor_set_direction(MOTOR_LEFT, MOTOR_FORWARD);
+    } else {
+        // Left turn: right motor forward, left motor backward
+        log_remote("Setting LEFT turn: Right motor forward, Left motor backward");
+        motor_set_direction(MOTOR_RIGHT, MOTOR_FORWARD);
+        motor_set_direction(MOTOR_LEFT, MOTOR_BACKWARD);
+    }
+}
+
+void motor_turn_to_cardinal(Direction target, float heading_offset)
+{
+    const float LEFT_MOTOR_COMPENSATION = 1.2f;  // Same compensation as in test
+    const unsigned long STABLE_TIME_REQUIRED_MS = 250; // Require heading to be stable within tolerance for 250ms
+    
+    unsigned long within_tolerance_time = 0;
+    unsigned long last_loop_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    
+    // PID constants - adjusted for more aggressive error correction
+    const float Kp = 0.5f;  // Increased from 1.0 to provide more aggressive correction
+    const float Ki = 0.0f;  // Keep integral at 0 to prevent windup
+    const float Kd = 0.2f;  // Increased from 0.1 to provide more damping
+    
+    float integral = 0.0f;
+    float previous_error = 0.0f;
+    
+    log_remote("--- Starting motor_turn_to_cardinal --- Target: %d, Offset: %.2f ---", target, heading_offset);
+    
+    // Get current heading
+    float current_yaw = mpu_get_orientation().yaw;
+    log_remote("[Turn Start] Current heading: %.2f degrees", current_yaw);
+    
+    // Calculate target yaw with offset
+    float target_yaw = (float)target + heading_offset;
+    
+    // Normalize target angle to [0, 360)
+    while (target_yaw >= 360.0f) target_yaw -= 360.0f;
+    while (target_yaw < 0.0f) target_yaw += 360.0f;
+    log_remote("[Turn Calc] Normalized Target Yaw: %.2f degrees", target_yaw);
+    
+    // Calculate the shortest turn error and direction
+    float error = target_yaw - current_yaw;
+    if (error > 180.0f) error -= 360.0f;
+    if (error < -180.0f) error += 360.0f;
+    
+    log_remote("[Turn Calc] Initial Error: %.2f degrees (will turn %s)", 
+               error, error > 0 ? "counterclockwise" : "clockwise");
+    
+    // Check if already at target
+    if (fabs(error) < MOTOR_TOLERANCE_DEG) {
+        log_remote("[Turn Start] Already within tolerance (%.2f < %.2f). No turn needed.", fabs(error), MOTOR_TOLERANCE_DEG);
+        motor_stop(); // Ensure motors are stopped
+        return;
+    }
+    
+    // Record start time
+    unsigned long start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    log_remote("[Turn Loop] Starting turn loop...");
+    
+    // Turn until target is reached, stable, or timeout
+    while (1) {
+        unsigned long current_loop_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        unsigned long loop_dt = current_loop_time - last_loop_time;
+        last_loop_time = current_loop_time;
+
+        // Check timeout
+        if ((current_loop_time - start_time) > MOTOR_TIMEOUT_MS) {
+            log_remote("[Turn Loop] Timeout reached after %lu ms", current_loop_time - start_time);
+            break;
+        }
+        
+        // Get current heading
+        current_yaw = mpu_get_orientation().yaw;
+        
+        // Calculate remaining angle (normalized to [-180, 180])
+        error = target_yaw - current_yaw;
+        if (error > 180.0f) error -= 360.0f;
+        if (error < -180.0f) error += 360.0f;
+        
+        // PID calculations
+        integral += error * loop_dt;
+        float derivative = (error - previous_error) / loop_dt;
+        float pid_output = Kp * error + Ki * integral + Kd * derivative;
+        previous_error = error;
+        
+        // Scale PID output to duty cycle range - adjusted to maintain higher torque for small errors
+        float duty_ratio = fabs(pid_output) / 35.0f; // Reduced divisor to maintain higher torque for small errors
+        duty_ratio = fmaxf(0.3f, fminf(duty_ratio, 0.65f)); // Increased minimum duty ratio to 0.3
+        
+        // Calculate adjusted duty cycles
+        long adjusted_duty = (long)(duty_ratio * PWM_MAX_DUTY);
+        long adjusted_left_duty = (long)(adjusted_duty * LEFT_MOTOR_COMPENSATION);
+        
+        // Set motor speeds based on current error sign
+        if (error > 0) {
+            set_motor_speed(adjusted_duty, -adjusted_left_duty);  // Right motor forward, left motor backward
+        } else {
+            set_motor_speed(-adjusted_duty, adjusted_left_duty);  // Right motor backward, left motor forward
+        }
+        
+        log_remote("[Turn Loop] Current: %.2f, Target: %.2f, Error: %.2f, Duty Ratio: %.2f, StableTime: %lu ms", 
+                   current_yaw, target_yaw, error, duty_ratio, within_tolerance_time);
+        
+        // Check if turn is complete and stable
+        if (fabs(error) < MOTOR_TOLERANCE_DEG) {
+            within_tolerance_time += loop_dt;
+            if (within_tolerance_time >= STABLE_TIME_REQUIRED_MS) {
+                log_remote("[Turn Loop] Turn complete - heading stable within tolerance for %lu ms", within_tolerance_time);
+                break;
+            }
+        } else {
+            within_tolerance_time = 0; // Reset stable timer if we go out of tolerance
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(20)); // Increased delay slightly for stability
+    }
+    
+    // Stop motors
+    log_remote("[Turn End] Stopping motors.");
+    motor_stop();
+    float final_heading = mpu_get_orientation().yaw;
+    log_remote("[Turn End] Final heading: %.2f degrees (Error: %.2f)", 
+               final_heading, calculate_yaw_error(target_yaw, final_heading));
+    log_remote("--- motor_turn_to_cardinal finished ---");
+}
+
+void test_motor_directions(void)
+{
+    log_remote("Starting motor rotation test sequence with compensation");
+    const float TEST_SPEED = 0.55f;
+    const float LEFT_COMPENSATION = 1.2f;  // Try 20% more power for left motor
+    long right_duty = (long)(TEST_SPEED * PWM_MAX_DUTY);
+    long left_duty = (long)(TEST_SPEED * LEFT_COMPENSATION * PWM_MAX_DUTY);
+    
+    log_remote("Using compensation factor %.2f for left motor (Right duty: %ld, Left duty: %ld)", 
+               LEFT_COMPENSATION, right_duty, left_duty);
+    
+    // Test clockwise rotation (right motor backward, left motor forward)
+    log_remote("Testing CLOCKWISE rotation for 2 seconds (Right=BACKWARD, Left=FORWARD)");
+    motor_set_direction(MOTOR_RIGHT, MOTOR_BACKWARD);
+    motor_set_direction(MOTOR_LEFT, MOTOR_FORWARD);
+    ledc_set_duty(PWM_MODE, PWM_CHANNEL_A, right_duty);  // Right motor
+    ledc_set_duty(PWM_MODE, PWM_CHANNEL_B, left_duty);   // Left motor (compensated)
+    ledc_update_duty(PWM_MODE, PWM_CHANNEL_A);
+    ledc_update_duty(PWM_MODE, PWM_CHANNEL_B);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    
+    // Stop and wait
+    motor_stop();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    
+    // Test counterclockwise rotation (right motor forward, left motor backward)
+    log_remote("Testing COUNTERCLOCKWISE rotation for 2 seconds (Right=FORWARD, Left=BACKWARD)");
+    motor_set_direction(MOTOR_RIGHT, MOTOR_FORWARD);
+    motor_set_direction(MOTOR_LEFT, MOTOR_BACKWARD);
+    ledc_set_duty(PWM_MODE, PWM_CHANNEL_A, right_duty);  // Right motor
+    ledc_set_duty(PWM_MODE, PWM_CHANNEL_B, left_duty);   // Left motor (compensated)
+    ledc_update_duty(PWM_MODE, PWM_CHANNEL_A);
+    ledc_update_duty(PWM_MODE, PWM_CHANNEL_B);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    
+    // Stop
+    motor_stop();
+    log_remote("Motor rotation test complete");
+}
+
+
+void test_navigation(void)
+{
+    log_remote("\n=== Starting Navigation Test ===\n");
+
+    motor_forward_distance(0.0f, 0.0f);  
+    
+    // Test sequence: Drive in a square pattern
+    Direction directions[] = {NORTH, EAST, SOUTH, WEST};
+    const int num_directions = sizeof(directions) / sizeof(directions[0]);
+    
+    for (int i = 0; i < num_directions; i++) {
+        // First turn to the target direction
+        Direction target = directions[i];
+        log_remote("\nTest %d: Turning to direction %d (0=N, 90=E, 180=S, 270=W)", i + 1, target);
+        
+        // Get initial heading before turn
+        float initial_heading = mpu_get_orientation().yaw;
+        log_remote("Initial heading before turn: %.2f degrees", initial_heading);
+        
+        // Perform the turn with no offset
+        motor_turn_to_cardinal(target, 0.0f);
+        
+        // Get heading after turn
+        float post_turn_heading = mpu_get_orientation().yaw;
+        log_remote("Heading after turn: %.2f degrees", post_turn_heading);
+        
+        // Wait a moment to stabilize
+        vTaskDelay(pdMS_TO_TICKS(500));
+        
+        // Now drive forward one block
+        log_remote("Driving forward one block...");
+        drive_result_t result = motor_forward_distance(0.0f, 0.0f);  // No compensation for first attempt
+        
+        // Log the results
+        log_remote("Forward movement complete:");
+        log_remote("  Final heading error: %.2f degrees", result.heading);
+        log_remote("  Ultrasonic readings - Front: %.1f cm, Left: %.1f cm, Right: %.1f cm",
+                  result.ultrasonic.front, result.ultrasonic.left, result.ultrasonic.right);
+        
+        // Wait between segments
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    
+    // Final turn back to North to complete the square
+    log_remote("\nFinal turn back to North...");
+    motor_turn_to_cardinal(NORTH, 0.0f);
+    
+    log_remote("\n=== Navigation Test Complete ===\n");
+} 

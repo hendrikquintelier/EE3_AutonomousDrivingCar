@@ -31,7 +31,7 @@
 #define WIFI_PASSWORD "boenkie123"
 
 // Server configuration
-#define SERVER_IP "192.168.73.87"
+#define SERVER_IP "192.168.117.87"
 #define SERVER_PORT 1234
 
 #define MAX_BUFFER_SIZE 50

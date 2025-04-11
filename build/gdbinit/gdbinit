@@ -1,0 +1,2 @@
+source C:/ESP32_Projects/EE3_AutonomousDrivingCar/build/gdbinit/symbols
+source C:/ESP32_Projects/EE3_AutonomousDrivingCar/build/gdbinit/connect

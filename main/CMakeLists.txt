@@ -1,9 +1,9 @@
 idf_component_register(
-    SRCS "main.c"
-         "motorcontrol.c"
-         "ultrasonic.c"
-         "mpu.c"
-         "encoder.c"
+    SRCS "irsensor.c" "main.c"
+        
+        
+        
+        
          "wifi_logger.c"
     INCLUDE_DIRS "."
 )

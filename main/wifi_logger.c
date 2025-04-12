@@ -31,7 +31,7 @@
 #define WIFI_PASSWORD "boenkie123"
 
 // Server configuration
-#define SERVER_IP "192.168.117.87"
+#define SERVER_IP "192.168.157.87"
 #define SERVER_PORT 1234
 
 #define MAX_BUFFER_SIZE 50
@@ -60,15 +60,6 @@ static uint16_t server_port;
 static uint32_t last_log_time = 0;
 static bool wifi_connected = false;
 
-
-// Message buffer
-static buffered_message_t message_buffer[MAX_BUFFER_SIZE];
-static int buffer_head = 0;
-static int buffer_tail = 0;
-static int buffer_count = 0;
-static uint32_t first_error_time = 0;
-static bool error_reported = false;
-
 // Socket state variables
 static bool socket_initialized = false;
 static bool socket_needs_recreation = false;
@@ -76,6 +67,8 @@ static uint32_t last_socket_recreation = 0;
 static uint32_t last_successful_send = 0;
 static int retry_count = 0;
 static uint32_t last_retry_time = 0;
+static uint32_t first_error_time = 0;
+static bool error_reported = false;
 #define SOCKET_RECREATION_COOLDOWN_MS 5000 // 5 seconds cooldown between recreation attempts
 #define SOCKET_TIMEOUT_MS 10000            // 10 seconds without successful send before recreation
 
@@ -125,10 +118,6 @@ static void wifi_logger_task(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
-
-
-
-
 
 // Function to create and configure UDP socket
 static esp_err_t create_udp_socket(const char *server_ip, uint16_t server_port)
@@ -382,13 +371,12 @@ esp_err_t wifi_logger_init(void)
     return ESP_OK;
 }
 
-
 void log_remote(const char *format, ...)
 {
     // Only log if WiFi is connected and socket is initialized
     if (!wifi_connected || !socket_initialized)
     {
-        printf("Warning: Attempted to log before WiFi connection was established\n");
+        // printf("Warning: Attempted to log before WiFi connection was established\n");
         return;
     }
 

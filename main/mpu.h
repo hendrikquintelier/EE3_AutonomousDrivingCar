@@ -27,6 +27,12 @@ extern "C"
      */
     mpu_data_t mpu_get_orientation(void);
 
+    /**
+     * @brief Gets the current sampling rate of the MPU6050 in Hz.
+     * @return float The current sampling rate in Hz.
+     */
+    float mpu_get_sampling_rate(void);
+
     // Log orientation data with change rate
     void mpu_log_orientation(float current_yaw, float last_yaw, uint32_t print_interval_ms);
 
@@ -40,6 +46,8 @@ extern "C"
      * @brief Resets the movement tracking (position and velocity)
      */
     void mpu_reset_movement(void);
+
+    void mpu_monitor_interrupts(void);
 
 #ifdef __cplusplus
 }

@@ -52,7 +52,8 @@ void motor_turn_to_cardinal(Direction target, float heading_offset);
 void motor_stop(void);
 
 // Updated function signature to accept compensation parameters and return results
-drive_result_t motor_forward_distance(float heading_compensation, float distance_compensation);
+
+drive_result_t motor_forward_distance(Direction target, float heading_compensation, float distance_compensation);
 
 // Control structures
 typedef struct
@@ -81,5 +82,6 @@ void test_motor_directions(void);
 // Test functions
 void test_motor_control(void);
 void test_navigation(void);
+void test_turning(void);
 
 #endif // MOTORCONTROL_H

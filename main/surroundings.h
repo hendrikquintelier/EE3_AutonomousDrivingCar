@@ -18,6 +18,7 @@ typedef struct
     ultrasonic_readings_t ultrasonic;
     float forward_distance_overshoot;
     float heading;
+    float distance;
 } drive_result_t;
 
 typedef struct

@@ -1,7 +1,7 @@
 {
     "version":            "1.1",
     "project_name":       "EE3_AutonomousDrivingCar",
-    "project_version":    "a300a3d-dirty",
+    "project_version":    "11b7423-dirty",
     "project_path":       "C:/Workspace/EE3/EE3_AutonomousDrivingCar",
     "idf_path":           "C:/Users/Hendrik Quintelier/esp/v5.4/esp-idf",
     "build_dir":          "C:/Workspace/EE3/EE3_AutonomousDrivingCar/build",
@@ -1195,7 +1195,7 @@
             "managed_reqs": [],
             "managed_priv_reqs": [],
             "file": "C:/Workspace/EE3/EE3_AutonomousDrivingCar/build/esp-idf/main/libmain.a",
-            "sources": [ "C:/Workspace/EE3/EE3_AutonomousDrivingCar/main/main.c", "C:/Workspace/EE3/EE3_AutonomousDrivingCar/main/motorcontrol.c", "C:/Workspace/EE3/EE3_AutonomousDrivingCar/main/ultrasonic.c", "C:/Workspace/EE3/EE3_AutonomousDrivingCar/main/mpu.c", "C:/Workspace/EE3/EE3_AutonomousDrivingCar/main/encoder.c", "C:/Workspace/EE3/EE3_AutonomousDrivingCar/main/wifi_logger.c", "C:/Workspace/EE3/EE3_AutonomousDrivingCar/main/surroundings.c" ],
+            "sources": [ "C:/Workspace/EE3/EE3_AutonomousDrivingCar/main/main.c", "C:/Workspace/EE3/EE3_AutonomousDrivingCar/main/motorcontrol.c", "C:/Workspace/EE3/EE3_AutonomousDrivingCar/main/ultrasonic.c", "C:/Workspace/EE3/EE3_AutonomousDrivingCar/main/mpu.c", "C:/Workspace/EE3/EE3_AutonomousDrivingCar/main/encoder.c", "C:/Workspace/EE3/EE3_AutonomousDrivingCar/main/wifi_logger.c" ],
             "include_dirs": [ "." ]
         },
         "mbedtls": {

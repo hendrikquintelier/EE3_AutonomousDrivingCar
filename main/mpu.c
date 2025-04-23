@@ -245,78 +245,83 @@ static void calibrate_accel(void)
 
 static void update_orientation(void)
 {
+    /*--------------------------------------------------------------------
+     *  Time‐base
+     *------------------------------------------------------------------*/
     uint64_t current_time_us = esp_timer_get_time();
-    float dt = (current_time_us - mpu_state.last_update_us) / 1000000.0f;
-    if (dt <= 0 || dt > 0.1f)
-        dt = 0.01f;
+    float dt = (current_time_us - mpu_state.last_update_us) / 1e6f;   /* seconds */
+    if (dt <= 0.0f || dt > 0.1f) dt = 0.01f;                          /* clamp   */
     mpu_state.last_update_us = current_time_us;
 
-    // Calculate angles from accelerometer
-    float accel_roll = atan2f(mpu_state.accel[0], mpu_state.accel[2]) * 180.0f / M_PI;
-    float accel_pitch = atan2f(-mpu_state.accel[1], sqrtf(mpu_state.accel[0] * mpu_state.accel[0] +
-                                                          mpu_state.accel[2] * mpu_state.accel[2])) *
+    /*--------------------------------------------------------------------
+     *  Roll & Pitch from accelerometer
+     *------------------------------------------------------------------*/
+    float accel_roll  = atan2f(mpu_state.accel[0], mpu_state.accel[2]) *
+                        180.0f / M_PI;
+    float accel_pitch = atan2f(-mpu_state.accel[1],
+                        sqrtf(mpu_state.accel[0]*mpu_state.accel[0] +
+                              mpu_state.accel[2]*mpu_state.accel[2])) *
                         180.0f / M_PI;
 
-    // Complementary filter
-    mpu_state.angles[0] = ALPHA * (mpu_state.angles[0] + mpu_state.gyro[1] * dt) +
-                          (1 - ALPHA) * accel_roll;
-    mpu_state.angles[1] = ALPHA * (mpu_state.angles[1] + mpu_state.gyro[0] * dt) +
-                          (1 - ALPHA) * accel_pitch;
+    /*--------------------------------------------------------------------
+     *  Complementary filter
+     *------------------------------------------------------------------*/
+    mpu_state.angles[0] = ALPHA * (mpu_state.angles[0] +
+                          mpu_state.gyro[1] * dt) +
+                          (1.0f - ALPHA) * accel_roll;
 
-    // Update yaw with threshold and scaling
-    float filtered_gyro_z = (fabsf(mpu_state.gyro[2]) < GYRO_THRESHOLD) ? 0.0f : mpu_state.gyro[2];
-    mpu_state.angles[2] += filtered_gyro_z * dt * GYRO_SCALE;
+    mpu_state.angles[1] = ALPHA * (mpu_state.angles[1] +
+                          mpu_state.gyro[0] * dt) +
+                          (1.0f - ALPHA) * accel_pitch;
 
-    // Normalize yaw to [0, 360)
+    /*--------------------------------------------------------------------
+     *  Yaw — integrate Z-gyro
+     *  MPU-6050: +Z  = CCW.  Our convention: +yaw = CW  ⇒ subtract.
+     *------------------------------------------------------------------*/
+    float filtered_gyro_z = (fabsf(mpu_state.gyro[2]) < GYRO_THRESHOLD)
+                            ? 0.0f
+                            : mpu_state.gyro[2];
+
+    mpu_state.angles[2] -= filtered_gyro_z * dt * GYRO_SCALE;   /* CW-positive */
+
+    /* Wrap to [0, 360) */
     mpu_state.angles[2] = fmodf(mpu_state.angles[2], 360.0f);
     if (mpu_state.angles[2] < 0.0f)
         mpu_state.angles[2] += 360.0f;
 
-    // Calculate distance by double integrating acceleration
-    // Y-axis is horizontal, so no gravity compensation needed
-    float accel_y = mpu_state.accel[1] - mpu_state.accel_bias[1]; // Remove bias
+    /*--------------------------------------------------------------------
+     *  Dead-reckoning distance along Y (unchanged)
+     *------------------------------------------------------------------*/
+    float accel_y = mpu_state.accel[1] - mpu_state.accel_bias[1]; /* g units */
 
-    // Apply threshold to reduce noise and detect standing still
-    if (fabs(accel_y) < 0.05f)
-    { // 0.05g threshold
+    /* noise gate & stillness detection */
+    if (fabsf(accel_y) < 0.05f) {                   /* 0.05 g threshold */
         accel_y = 0.0f;
-        mpu_state.still_counter++;
-        if (mpu_state.still_counter > 10)
-        { // After 100ms of stillness
-            mpu_state.is_moving = false;
-            mpu_state.velocity_y = 0.0f;
+        if (++mpu_state.still_counter > 10) {       /* >100 ms still    */
+            mpu_state.is_moving   = false;
+            mpu_state.velocity_y  = 0.0f;
         }
-    }
-    else
-    {
+    } else {
         mpu_state.still_counter = 0;
-        mpu_state.is_moving = true;
+        mpu_state.is_moving     = true;
     }
 
-    // Reset position and velocity when movement starts
-    if (!mpu_state.movement_started && fabs(accel_y) > 0.1f)
-    { // 0.1g threshold for movement detection
+    /* reset when movement starts */
+    if (!mpu_state.movement_started && fabsf(accel_y) > 0.1f) {
         mpu_state.movement_started = true;
         mpu_state.velocity_y = 0.0f;
         mpu_state.position_y = 0.0f;
     }
 
-    // Scale acceleration to m/s^2 (1g = 9.81 m/s^2)
+    /* convert to m · s⁻² */
     accel_y *= 9.81f;
 
-    // First integration: velocity
-    if (mpu_state.is_moving)
-    {
+    /* integrate */
+    if (mpu_state.is_moving) {
         mpu_state.velocity_y += accel_y * dt;
-        // Apply stronger velocity damping to prevent drift
-        mpu_state.velocity_y *= 0.85f; // Increased damping from 0.95 to 0.85
+        mpu_state.velocity_y *= 0.85f;              /* damping */
     }
-
-    // Second integration: position
     mpu_state.position_y += mpu_state.velocity_y * dt;
-
-    // Store current acceleration for next iteration
-    mpu_state.last_accel_y = accel_y;
 }
 
 static void mpu_task(void *pvParameters)

@@ -333,96 +333,149 @@ void motor_stop(void)
  * @return drive_result_t Structure containing final heading error and other sensor readings.
  */
 Direction current_direction = NORTH;
-drive_result_t motor_forward_distance(float heading_compensation, float distance_compensation)
+/* ───────────────────────────────────────────────────────────────────────────
+ *  Adaptive duty profile helpers
+ * ──────────────────────────────────────────────────────────────────────────*/
+static float duty_profile(float duty_max,
+                          float remaining,
+                          float decel_start,
+                          float brake_start)
 {
+    /* Cruise */
+    if (remaining > decel_start)
+        return duty_max;
 
+    /* Linear taper  →  min 40 % duty at brake-start                        */
+    if (remaining > brake_start) {
+        float s = (remaining - brake_start) / (decel_start - brake_start); // 1→0
+        return duty_max * (0.40f + 0.60f * s);
+    }
+
+    /* Brake zone  (reverse-torque grows to −25 %)                          */
+    float b = (brake_start > 1.0f) ? (remaining / brake_start) : 0.0f;      // 1→0
+    return -duty_max * 0.25f * b;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ *  Refactored forward drive
+ * ──────────────────────────────────────────────────────────────────────────*/
+drive_result_t motor_forward_distance(float heading_comp, float dist_comp)
+{
+    /* Tunables ----------------------------------------------------------- */
+    const float RAMP_START_DUTY   = 0.30f;  /* soft-start 30 %             */
+    const float RAMP_STEP         = 0.02f;  /* +2 % each loop              */
+    const float CRUISE_DUTY_MAX   = MOTOR_SPEED;
+    const float RAMP_SPEED_CMPS   = 10.0f;  /* finish ramp when >10 cm/s   */
+    const unsigned LOOP_MS        = 50;     /* control period              */
+    const float STATIC_THRESHOLD  = 0.1f;   /* cm/s - considered static    */
+    const unsigned STATIC_TIME_MS = 500;    /* time to be static before exit */
+    /* -------------------------------------------------------------------- */
+
+    /* 1 )  Figure out how far to drive using the front ultrasonic sensor  */
+    ultrasonic_readings_t u = ultrasonic_get_all();
+    float front = (u.front < 1.0f || u.front > 400.0f) ? 0.0f : u.front;
+
+    float raw_off = fmodf(front, BLOCK_SIZE) - 10.0f;   /* −10 … +30 cm      */
+    if (raw_off >  8.0f) raw_off =  8.0f;
+    if (raw_off < -8.0f) raw_off = -8.0f;
+
+    float target_dist = BLOCK_SIZE + raw_off - dist_comp;        /* cm      */
+
+    log_remote("[FWD] front=%.1f cm  offset=%.1f → target=%.1f cm",
+               front, raw_off, target_dist);
+
+    /* 2 )  Setup -------------------------------------------------------- */
     drive_result_t result;
-    // Apply distance compensation
-    float compensated_distance = BLOCK_SIZE - distance_compensation;
-    
-    // Reset encoders and record initial heading
     encoder_reset();
-    float initial_yaw = current_direction;
-    // Normalize the target heading to the 0–360° range
-    float target_yaw = normalize_angle(initial_yaw + heading_compensation);
-    
-    log_remote("Starting drive for %.1f cm (compensated: %.1f cm) at max speed: %.0f%%, target yaw: %.2f° (compensated by %.2f°)",
-               BLOCK_SIZE, compensated_distance, MOTOR_SPEED * 100.0f, target_yaw, heading_compensation);
-    
-    // Set up motors for forward motion
+
+    float base_yaw   = current_direction;
+    float target_yaw = normalize_angle(base_yaw + heading_comp);
+
+    float duty_ratio  = RAMP_START_DUTY;
+    float last_dist   = 0.0f;
+    unsigned long last_ms = xTaskGetTickCount()*portTICK_PERIOD_MS;
+    last_pid_update      = last_ms;
+    unsigned long static_start_ms = 0;
+    bool is_static = false;
+
     set_motor_direction(true);
-    unsigned long base_duty = (unsigned long)(MOTOR_SPEED * PWM_MAX_DUTY);
-    set_motor_speed(base_duty, base_duty);
-    
-    unsigned long start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    last_pid_update = start_time;
-    
-    float last_distance = encoder_get_distance();
-    unsigned long still_time = 0;
-    const unsigned long STILL_THRESHOLD_MS = 250; // 0.25 seconds threshold
-    const float DECEL_THRESHOLD_CM = 30.0f;         // Begin deceleration when 30 cm remain
-    
-    // Main drive loop
+
+    /* 3 )  Main loop ----------------------------------------------------- */
     while (true) {
-        float current_distance = encoder_get_distance();
-        
-        // After 35 cm of travel, check if the car has become stationary.
-        if (current_distance > 35.0f) {
-            if (is_stationary(last_distance, current_distance, 0.1f)) {
-                still_time += 10;
-                if (still_time >= STILL_THRESHOLD_MS) {
-                    log_remote("Car stopped moving before reaching target distance. Current distance: %.2f cm", current_distance);
+        /* time & odometry */
+        unsigned long now_ms = xTaskGetTickCount()*portTICK_PERIOD_MS;
+        float dt = (now_ms - last_ms)/1000.0f; if (dt < 0.001f) dt = 0.001f;
+
+        float dist = encoder_get_distance();
+        float speed = (dist - last_dist)/dt;                        /* cm/s */
+        float remaining = target_dist - dist; if (remaining < 0) remaining = 0;
+
+        /* Check if car is static */
+        if (fabs(speed) < STATIC_THRESHOLD) {
+            if (!is_static) {
+                static_start_ms = now_ms;
+                is_static = true;
+            } else if ((now_ms - static_start_ms) >= STATIC_TIME_MS) {
+                /* Only exit if we've traveled at least 70% of the target distance */
+                if (dist >= 0.7f * target_dist) {
+                    log_remote("[FWD] Car is static for %lu ms and traveled %.1f/%.1f cm (%.0f%%), exiting", 
+                              STATIC_TIME_MS, dist, target_dist, (dist/target_dist)*100.0f);
                     break;
+                } else {
+                    log_remote("[FWD] Car is static but only traveled %.1f/%.1f cm (%.0f%%), continuing", 
+                              dist, target_dist, (dist/target_dist)*100.0f);
+                    is_static = false;  // Reset static state to try again
                 }
             }
-            else {
-                still_time = 0;
-            }
+        } else {
+            is_static = false;
         }
-        last_distance = current_distance;
-        
-        // If we've reached or surpassed the compensated distance, exit the loop.
-        if (current_distance >= compensated_distance) {
-            break;
+
+        /* dynamic thresholds */
+        const float DECEL_START = fmaxf(0.40f*target_dist, 12.0f);  /* ≥12 cm */
+        const float BRAKE_START = 1.0f;                             /* fixed */
+
+        /* a) ramp-up until >10 cm/s */
+        if (speed < RAMP_SPEED_CMPS && duty_ratio < CRUISE_DUTY_MAX) {
+            duty_ratio += RAMP_STEP;
+            if (duty_ratio > CRUISE_DUTY_MAX) duty_ratio = CRUISE_DUTY_MAX;
         }
-        
-        // Determine the decelerated speed.
-        float remaining = compensated_distance - current_distance;
-        float speed = compute_decelerated_speed(MOTOR_SPEED, remaining, DECEL_THRESHOLD_CM);
-        
-        // Get current heading and compute the heading error for PID correction.
-        mpu_data_t orientation = mpu_get_orientation();
-        float yaw_error = calculate_yaw_error(target_yaw, orientation.yaw);
-        
-        // Update the PID controller based on the elapsed time.
-        unsigned long new_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-        float dt = (new_time - last_pid_update) / 1000.0f;
-        if (dt < 0.001f)
-            dt = 0.001f;
-        last_pid_update = new_time;
-        float correction = calculate_heading_correction(yaw_error, dt);
-        
-        // Adjust motor speeds based on PID correction.
-        float duty_ratio_a = speed + correction;
-        float duty_ratio_b = speed - correction;
-        long duty_a = (long)(duty_ratio_a * PWM_MAX_DUTY + 0.5f);
-        long duty_b = (long)(duty_ratio_b * PWM_MAX_DUTY + 0.5f);
+
+        /* b) adaptive profile (overrides ramp once cruising) */
+        duty_ratio = duty_profile(duty_ratio, remaining,
+                                  DECEL_START, BRAKE_START);
+
+        /* heading PID */
+        mpu_data_t ori = mpu_get_orientation();
+        float yaw_err  = calculate_yaw_error(target_yaw, ori.yaw);
+        float dt_pid   = (now_ms - last_pid_update)/1000.0f;
+        if (dt_pid < 0.001f) dt_pid = 0.001f;
+        last_pid_update = now_ms;
+
+        float corr = calculate_heading_correction(yaw_err, dt_pid);
+
+        long duty_a = (long)((duty_ratio + corr)*PWM_MAX_DUTY + 0.5f);
+        long duty_b = (long)((duty_ratio - corr)*PWM_MAX_DUTY + 0.5f);
         set_motor_speed(duty_a, duty_b);
-        
-        log_remote("Distance: %.2f cm, Remaining: %.2f cm, Yaw: %.2f°, Error: %.2f°, Correction: %.2f, Speed: %.0f%%, Duty A: %ld, Duty B: %ld",
-                   current_distance, remaining, orientation.yaw, yaw_error, correction, speed * 100.0f, duty_a, duty_b);
-        
-        vTaskDelay(pdMS_TO_TICKS(10));
+
+        log_remote("[FWD] d=%.2f/%.1f  v=%.1f cm/s  rem=%.1f  duty=%.0f%%  yawErr=%.1f°",
+                   dist, target_dist, speed, remaining,
+                   duty_ratio*100.0f, yaw_err);
+
+        /* exit when we've covered the distance */
+        if (dist >= target_dist) break;
+
+        last_dist = dist;
+        last_ms   = now_ms;
+        vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
     }
-    
-    log_remote("Target distance reached (%.2f cm). Stopping motors.", encoder_get_distance());
+
+    /* stop, coast & gather result */
     motor_stop();
-    
-    // Allow the vehicle to coast to a stop and record the final status.
-    wait_for_stop(STILL_THRESHOLD_MS, &result, target_yaw);
-    
+    wait_for_stop(250, &result, target_yaw);
     return result;
 }
+
 
 /**
  * @brief Rotate the car to a specified direction with a heading offset.
@@ -742,49 +795,6 @@ void test_motor_directions(void)
 }
 
 
-void motor_turn_to_cardinal_slow(Direction target, float heading_offset);
-
-
-void test_navigation(void)
-{
-    log_remote("\n=== Starting Square Drive Test ===\n");
-    
-    // Define the sequence of directions for the square pattern
-    Direction directions[] = {EAST, SOUTH, WEST, NORTH};
-    const int num_directions = sizeof(directions) / sizeof(directions[0]);
-    
-    while(1) {
-        for (int i = 0; i < num_directions; i++) {
-            Direction target_direction = directions[i];
-            
-            // Turn to the target direction
-            log_remote("\nTurning to direction %d (0=N, 90=E, 180=S, 270=W)", target_direction);
-            float initial_heading = mpu_get_orientation().yaw;
-            log_remote("Initial heading before turn: %.2f degrees", initial_heading);
-            motor_turn_to_cardinal_slow(target_direction, 0.0f);
-            float post_turn_heading = mpu_get_orientation().yaw;
-            log_remote("Heading after turn: %.2f degrees", post_turn_heading);
-            
-            // Wait to stabilize
-            vTaskDelay(pdMS_TO_TICKS(500));
-            
-            // Drive forward one block
-            log_remote("\nDriving forward one block");
-            drive_result_t result = motor_forward_distance(0.0f, 0.0f);
-            log_remote("Forward movement complete:");
-            log_remote("  Final heading error: %.2f degrees", result.heading);
-            log_remote("  Ultrasonic readings - Front: %.1f cm, Left: %.1f cm, Right: %.1f cm",
-                       result.ultrasonic.front, result.ultrasonic.left, result.ultrasonic.right);
-            
-            // Wait to stabilize
-            vTaskDelay(pdMS_TO_TICKS(500));
-        }
-        
-        log_remote("\n=== Square pattern completed, starting next iteration ===\n");
-    }
-}
-
-
 
 /******************************************************************************
  *  motor_turn_to_cardinal_slow
@@ -805,7 +815,7 @@ void motor_turn_to_cardinal_slow(Direction target, float heading_offset)
     /* ───────────── tweakables ──────────────────────────────────────────── */
     const float  LEFT_FACTOR              = 1.0f;  /* compensate weaker left */
     const float  RAMP_START_DUTY          = 0.15f;  /* 15 % duty               */
-    const float  RAMP_MAX_DUTY            = 0.625f;  /* 60 % duty upper bound   */
+    const float  RAMP_MAX_DUTY            = 0.65f;  /* 60 % duty upper bound   */
     const float  RAMP_STEP                = 0.025f;  /* +2 % each loop          */
     const float  MIN_ANG_VEL_DPS          = 20.0f;  /* stop ramp when >10 °/s  */
 
@@ -958,3 +968,145 @@ void motor_turn_to_cardinal_slow(Direction target, float heading_offset)
                final_heading, final_error);
 }
 
+/**
+ *  Slow, smooth forward drive for one "block".
+ *  ──────────────────────────────────────────────────────────────────────────
+ *  1.  Duty starts at 15 % and rises by 2 % every 50 ms while
+ *      measured speed < 10 cm·s-¹  (or until the max cruise duty is hit).
+ *  2.  Once cruising, the duty is capped by the linear-deceleration profile
+ *      (same as in the fast routine) so the bot eases into the stop point.
+ *  3.  Heading is kept with the same PID used in `motor_forward_distance()`.
+ *  4.  Instantaneous speed is logged (cm · s-¹).
+ */
+drive_result_t motor_forward_distance_slow(float heading_comp, float dist_comp)
+{
+    /* ───── tunables ───── */
+    const float RAMP_START_DUTY   = 0.3f;   /* 15 %                       */
+    const float RAMP_STEP         = 0.02f;   /* +2 % every loop            */
+    const float CRUISE_DUTY_MAX   = MOTOR_SPEED;      /* from config       */
+    const float START_SPEED_CMPS  = 10.0f;   /* stop ramp when faster      */
+    const unsigned LOOP_MS        = 50;      /* slower loop is OK          */
+    /* ───────────────────── */
+
+    drive_result_t result;
+    float target_dist = BLOCK_SIZE - dist_comp;                 /* cm       */
+
+    /* encoder / IMU reset & headings */
+    encoder_reset();
+    float base_yaw   = current_direction;                       /* 0/90/…  */
+    float target_yaw = normalize_angle(base_yaw + heading_comp);
+
+    log_remote("[FWD-SLOW] drive %.1f cm  (target yaw %.2f°, comp %.2f°)",
+               target_dist, target_yaw, heading_comp);
+
+    /* soft-start variables */
+    float duty_ratio      = RAMP_START_DUTY;
+    float last_enc_dist   = 0.0f;
+    unsigned long last_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+    /* heading-PID vars (reuse gains / globals from fast version) */
+    last_pid_update = last_ms;
+
+    /* set forward direction */
+    set_motor_direction(true);
+
+    /* ───────────── main loop ───────────── */
+    while (true)
+    {
+        /* time & distance deltas */
+        unsigned long now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        float dt      = (now_ms - last_ms) / 1000.0f;           /* s       */
+        if (dt < 0.001f) dt = 0.001f;
+
+        float enc_dist = encoder_get_distance();                /* cm      */
+        float d_dist   = enc_dist - last_enc_dist;              /* cm      */
+        float speed    = d_dist / dt;                           /* cm·s-¹  */
+
+        /* 1 )  RAMP-UP — keep adding duty until speed threshold reached   */
+        if (speed < START_SPEED_CMPS && duty_ratio < CRUISE_DUTY_MAX)
+        {
+            duty_ratio += RAMP_STEP;
+            if (duty_ratio > CRUISE_DUTY_MAX) duty_ratio = CRUISE_DUTY_MAX;
+        }
+
+        /* 2 )  apply deceleration profile as we approach the goal         */
+        float remaining = target_dist - enc_dist;
+        if (remaining < 0) remaining = 0;
+        float cruise_cap = compute_decelerated_speed(CRUISE_DUTY_MAX,
+                                                     remaining, 30.0f);
+        if (duty_ratio > cruise_cap) duty_ratio = cruise_cap;
+
+        /* 3 )  heading PID correction                                     */
+        mpu_data_t ori = mpu_get_orientation();
+        float yaw_err  = calculate_yaw_error(target_yaw, ori.yaw);
+
+        float dt_pid   = (now_ms - last_pid_update) / 1000.0f;
+        if (dt_pid < 0.001f) dt_pid = 0.001f;
+        last_pid_update = now_ms;
+
+        float corr     = calculate_heading_correction(yaw_err, dt_pid);
+
+        /* 4 )  send PWM                                                   */
+        long duty_base = (long)(duty_ratio * PWM_MAX_DUTY + 0.5f);
+        long duty_a    = (long)((duty_ratio + corr) * PWM_MAX_DUTY + 0.5f);
+        long duty_b    = (long)((duty_ratio - corr) * PWM_MAX_DUTY + 0.5f);
+        set_motor_speed(duty_a, duty_b);
+
+        /* 5 )  logs                                                       */
+        log_remote("[FWD-SLOW] d=%.2f/%.1f cm  v=%.1f cm·s-¹  yaw=%.1f° "
+                   "err=%.1f°  duty=%.0f %%",
+                   enc_dist, target_dist, speed,
+                   ori.yaw, yaw_err, duty_ratio*100.0f);
+
+        /* 6 )  termination checks                                         */
+        if (enc_dist >= target_dist) break;
+
+        last_enc_dist = enc_dist;
+        last_ms       = now_ms;
+        vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
+    }
+
+    /* stop, coast & gather result */
+    motor_stop();
+    wait_for_stop(250, &result, target_yaw);
+    return result;
+}
+
+void test_navigation(void)
+{
+    log_remote("\n=== Starting Square Drive Test ===\n");
+    
+    // Define the sequence of directions for the square pattern
+    Direction directions[] = {EAST, SOUTH, WEST, NORTH};
+    const int num_directions = sizeof(directions) / sizeof(directions[0]);
+    
+    while(1) {
+        for (int i = 0; i < num_directions; i++) {
+            Direction target_direction = directions[i];
+            
+            // Turn to the target direction
+            log_remote("\nTurning to direction %d (0=N, 90=E, 180=S, 270=W)", target_direction);
+            float initial_heading = mpu_get_orientation().yaw;
+            log_remote("Initial heading before turn: %.2f degrees", initial_heading);
+            motor_turn_to_cardinal_slow(target_direction, 0.0f);
+            float post_turn_heading = mpu_get_orientation().yaw;
+            log_remote("Heading after turn: %.2f degrees", post_turn_heading);
+            
+            // Wait to stabilize
+            vTaskDelay(pdMS_TO_TICKS(500));
+            
+            // Drive forward one block
+            log_remote("\nDriving forward one block");
+            drive_result_t result = motor_forward_distance(0.0f, 0.0f);
+            log_remote("Forward movement complete:");
+            log_remote("  Final heading error: %.2f degrees", result.heading);
+            log_remote("  Ultrasonic readings - Front: %.1f cm, Left: %.1f cm, Right: %.1f cm",
+                       result.ultrasonic.front, result.ultrasonic.left, result.ultrasonic.right);
+            
+            // Wait to stabilize
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        
+        log_remote("\n=== Square pattern completed, starting next iteration ===\n");
+    }
+}

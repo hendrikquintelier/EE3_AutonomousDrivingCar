@@ -17,11 +17,11 @@
 #define MOTOR_BACKWARD 1
 
 // Motor Control Parameters
-#define MOTOR_SPEED 0.7f // 70% speed
+#define MOTOR_SPEED 0.575f // 70% speed
 
 // Turn Control Parameters
 #define MOTOR_TIMEOUT 3000 // Maximum time allowed for a turn (3 seconds)
-#define MOTOR_TURN_SPEED 0.65f // Speed for turning
+
 #define MOTOR_TOLERANCE 2.0f // Tolerance for turn completion in degrees
 #define MOTOR_MIN_TIME 300 // Minimum time for a turn
 

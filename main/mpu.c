@@ -50,7 +50,7 @@
 #define ALPHA 0.98f              // Complementary filter coefficient
 #define GYRO_THRESHOLD 0.1f      // Threshold for yaw changes (°/s)
 #define CALIBRATION_SAMPLES 2000 // Number of calibration samples
-#define GYRO_SCALE 1.1f          // Yaw scaling factor
+#define GYRO_SCALE 1.0f          // Yaw scaling factor
 
 // ============================================================================
 // Ultrasonic Filter Parameters

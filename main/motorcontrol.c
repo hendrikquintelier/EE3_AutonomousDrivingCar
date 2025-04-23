@@ -41,9 +41,9 @@
 // ============================================================================
 // PID Control Parameters
 // ============================================================================
-#define PID_KP 0.03f         // Further reduced for gentler response
-#define PID_KI 0.0002f       // Reduced integral action
-#define PID_KD 0.00035f      // Increased derivative gain for better damping
+#define PID_KP 0.005f         // Further reduced for gentler response
+#define PID_KI 0.0001f       // Reduced integral action
+#define PID_KD 0.0015f      // Increased derivative gain for better damping
 #define PID_I_MAX 0.03f      // Reduced integral windup limit
 #define PID_UPDATE_MS 10     // Reduced update interval for more responsive control
 #define DRIVE_TIME_MS 5000   // Total drive time (10 seconds)
@@ -52,14 +52,14 @@
 // ============================================================================
 // Turn Control Parameters
 // ============================================================================
-#define TURN_SPEED 0.65f     // Speed for turning
+#define TURN_SPEED 0.45f     // Speed for turning
 #define TURN_TOLERANCE 2.0f  // Tolerance for turn completion
 #define MIN_TURN_TIME_MS 300 // Minimum time for a turn
 
 // Additional parameters for turning and calibration (not used directly in this function)
-#define TURN_PID_KP 0.3f            
-#define TURN_PID_KI 0.01f          
-#define TURN_PID_KD 0.05f         
+#define TURN_PID_KP 0.05f            
+#define TURN_PID_KI 0.001f          
+#define TURN_PID_KD 0.005f         
 #define TURN_PID_I_MAX 0.5f       
 #define CALIBRATION_SPEED 0.3f      
 #define CALIBRATION_TIME_MS 2000    
@@ -250,6 +250,13 @@ static float calculate_heading_correction(float error, float dt)
         derivative = -MAX_DERIVATIVE;
 
     float output = PID_KP * error + PID_KI * yaw_integral + PID_KD * derivative;
+    
+    // Clip output to maximum of 0.25
+    if (output > 0.25f)
+        output = 0.25f;
+    else if (output < -0.25f)
+        output = -0.25f;
+        
     last_yaw_error = error;
     return output;
 }
@@ -325,15 +332,17 @@ void motor_stop(void)
  * @param distance_compensation Distance compensation in cm (subtracted from BLOCK_SIZE).
  * @return drive_result_t Structure containing final heading error and other sensor readings.
  */
+Direction current_direction = NORTH;
 drive_result_t motor_forward_distance(float heading_compensation, float distance_compensation)
 {
+
     drive_result_t result;
     // Apply distance compensation
     float compensated_distance = BLOCK_SIZE - distance_compensation;
     
     // Reset encoders and record initial heading
     encoder_reset();
-    float initial_yaw = mpu_get_orientation().yaw;
+    float initial_yaw = current_direction;
     // Normalize the target heading to the 0–360° range
     float target_yaw = normalize_angle(initial_yaw + heading_compensation);
     
@@ -457,6 +466,7 @@ static float calculate_turn_correction(float error, float dt) {
 }
 
 drive_result_t motor_rotate_to_direction(float target_direction, float heading_offset) {
+    current_direction = target_direction;
     drive_result_t result;
     const float LEFT_MOTOR_COMPENSATION = 1.2f;  // Compensation factor for left motor's lower torque
     
@@ -576,6 +586,7 @@ void set_motor_turn(bool turn_right)
 
 void motor_turn_to_cardinal(Direction target, float heading_offset)
 {
+    current_direction = target;
     const float LEFT_MOTOR_COMPENSATION = 1.2f;  // Same compensation as in test
     const unsigned long STABLE_TIME_REQUIRED_MS = 250; // Require heading to be stable within tolerance for 250ms
     
@@ -583,9 +594,9 @@ void motor_turn_to_cardinal(Direction target, float heading_offset)
     unsigned long last_loop_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
     
     // PID constants - adjusted for more aggressive error correction
-    const float Kp = 0.5f;  // Increased from 1.0 to provide more aggressive correction
+    const float Kp = 0.2f;  // Increased from 1.0 to provide more aggressive correction
     const float Ki = 0.0f;  // Keep integral at 0 to prevent windup
-    const float Kd = 0.2f;  // Increased from 0.1 to provide more damping
+    const float Kd = 0.05f;  // Increased from 0.1 to provide more damping
     
     float integral = 0.0f;
     float previous_error = 0.0f;
@@ -731,52 +742,219 @@ void test_motor_directions(void)
 }
 
 
+void motor_turn_to_cardinal_slow(Direction target, float heading_offset);
+
+
 void test_navigation(void)
 {
-    log_remote("\n=== Starting Navigation Test ===\n");
-
-    motor_forward_distance(0.0f, 0.0f);  
+    log_remote("\n=== Starting Square Drive Test ===\n");
     
-    // Test sequence: Drive in a square pattern
-    Direction directions[] = {NORTH, EAST, SOUTH, WEST};
+    // Define the sequence of directions for the square pattern
+    Direction directions[] = {EAST, SOUTH, WEST, NORTH};
     const int num_directions = sizeof(directions) / sizeof(directions[0]);
     
-    for (int i = 0; i < num_directions; i++) {
-        // First turn to the target direction
-        Direction target = directions[i];
-        log_remote("\nTest %d: Turning to direction %d (0=N, 90=E, 180=S, 270=W)", i + 1, target);
+    while(1) {
+        for (int i = 0; i < num_directions; i++) {
+            Direction target_direction = directions[i];
+            
+            // Turn to the target direction
+            log_remote("\nTurning to direction %d (0=N, 90=E, 180=S, 270=W)", target_direction);
+            float initial_heading = mpu_get_orientation().yaw;
+            log_remote("Initial heading before turn: %.2f degrees", initial_heading);
+            motor_turn_to_cardinal_slow(target_direction, 0.0f);
+            float post_turn_heading = mpu_get_orientation().yaw;
+            log_remote("Heading after turn: %.2f degrees", post_turn_heading);
+            
+            // Wait to stabilize
+            vTaskDelay(pdMS_TO_TICKS(500));
+            
+            // Drive forward one block
+            log_remote("\nDriving forward one block");
+            drive_result_t result = motor_forward_distance(0.0f, 0.0f);
+            log_remote("Forward movement complete:");
+            log_remote("  Final heading error: %.2f degrees", result.heading);
+            log_remote("  Ultrasonic readings - Front: %.1f cm, Left: %.1f cm, Right: %.1f cm",
+                       result.ultrasonic.front, result.ultrasonic.left, result.ultrasonic.right);
+            
+            // Wait to stabilize
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
         
-        // Get initial heading before turn
-        float initial_heading = mpu_get_orientation().yaw;
-        log_remote("Initial heading before turn: %.2f degrees", initial_heading);
-        
-        // Perform the turn with no offset
-        motor_turn_to_cardinal(target, 0.0f);
-        
-        // Get heading after turn
-        float post_turn_heading = mpu_get_orientation().yaw;
-        log_remote("Heading after turn: %.2f degrees", post_turn_heading);
-        
-        // Wait a moment to stabilize
-        vTaskDelay(pdMS_TO_TICKS(500));
-        
-        // Now drive forward one block
-        log_remote("Driving forward one block...");
-        drive_result_t result = motor_forward_distance(0.0f, 0.0f);  // No compensation for first attempt
-        
-        // Log the results
-        log_remote("Forward movement complete:");
-        log_remote("  Final heading error: %.2f degrees", result.heading);
-        log_remote("  Ultrasonic readings - Front: %.1f cm, Left: %.1f cm, Right: %.1f cm",
-                  result.ultrasonic.front, result.ultrasonic.left, result.ultrasonic.right);
-        
-        // Wait between segments
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        log_remote("\n=== Square pattern completed, starting next iteration ===\n");
     }
-    
-    // Final turn back to North to complete the square
-    log_remote("\nFinal turn back to North...");
-    motor_turn_to_cardinal(NORTH, 0.0f);
-    
-    log_remote("\n=== Navigation Test Complete ===\n");
-} 
+}
+
+
+
+/******************************************************************************
+ *  motor_turn_to_cardinal_slow
+ *
+ *  Slow, accurate 90 ° (cardinal) turn with soft-start and soft-stop.
+ *  ──────────────────────────────────────────────────────────────────────────
+ *  1.  *Ramp-up* : increase PWM in 2 % steps every 15 ms until angular speed
+ *      exceeds 10 °/s (or the max ramp duty is reached).
+ *  2.  *Coarse zone* (|err| ≥ 60 °) : keep last ramp duty.
+ *  3.  *Proportional zone* (15 ° < |err| < 60 °) : linearly drop duty
+ *      0.60 → 0.0 as error shrinks 60→15 °.
+ *  4.  *Brake zone* (|err| ≤ 15 °) : reverse-torque rises 0 → 0.25 duty.
+ *  5.  *Overshoot* : if sign(error) flips, fire a 0.30 duty brake pulse
+ *      opposite to motion and end the routine.
+ ******************************************************************************/
+void motor_turn_to_cardinal_slow(Direction target, float heading_offset)
+{
+    /* ───────────── tweakables ──────────────────────────────────────────── */
+    const float  LEFT_FACTOR              = 1.0f;  /* compensate weaker left */
+    const float  RAMP_START_DUTY          = 0.15f;  /* 15 % duty               */
+    const float  RAMP_MAX_DUTY            = 0.625f;  /* 60 % duty upper bound   */
+    const float  RAMP_STEP                = 0.025f;  /* +2 % each loop          */
+    const float  MIN_ANG_VEL_DPS          = 20.0f;  /* stop ramp when >10 °/s  */
+
+    const float  COARSE_TO_PROP_DEG       = 50.0f;
+    const float  BRAKE_ZONE_BEGIN_DEG     = 12.0f;
+    const float  MAX_PROP_DUTY            = 0.60f;
+    const float  MAX_BRAKE_DUTY           = 0.25f;
+    const float  OVERSHOOT_BRAKE_DUTY     = 0.375f;  // Changed from 0.20f to 0.30f to match comment
+
+    const unsigned STABLE_TIME_REQUIRED_MS= 300;
+    const unsigned LOOP_PERIOD_MS         = 15;
+    /* ───────────────────────────────────────────────────────────────────── */
+
+    /* Keep global state aligned with the new facing.                       */
+    current_direction = target;
+
+    /* ----- derive final heading ----- */
+    float desired_heading = normalize_angle((float)target + heading_offset);
+
+    /* ----- get initial orientation & error ----- */
+    float heading      = mpu_get_orientation().yaw;
+    float error        = calculate_yaw_error(desired_heading, heading);
+    int   dir_sign     = (error >= 0.0f) ? +1 : -1;          /* +1 CCW, -1 CW */
+
+    log_remote("[TURN-SLOW] start heading %.2f°, want %.2f° (err %.2f°)",
+               heading, desired_heading, error);
+
+    /******************************  RAMP-UP  ********************************/
+    float duty_ratio   = RAMP_START_DUTY;
+    float last_yaw     = heading;
+    unsigned long last_tick_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+    while (duty_ratio <= RAMP_MAX_DUTY)
+    {
+        /* apply current duty */
+        long duty  = (long)(duty_ratio * PWM_MAX_DUTY);
+        long right =  dir_sign * duty;                         /* sign fixed  */
+        long left  = -dir_sign * duty * LEFT_FACTOR;
+        set_motor_speed(right, left);
+
+        /* wait one control period */
+        vTaskDelay(pdMS_TO_TICKS(LOOP_PERIOD_MS));
+
+        /* measure angular velocity */
+        unsigned long now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        float dt   = (now_ms - last_tick_ms) / 1000.0f;        /* s           */
+        if (dt < 0.001f) dt = 0.001f;
+
+        float yaw   = mpu_get_orientation().yaw;
+        float dYaw  = calculate_yaw_error(yaw, last_yaw);      /* signed diff */
+        float yaw_rate = fabsf(dYaw) / dt;                     /* °/s         */
+
+        log_remote("[TURN-SLOW][RAMP] duty %.0f %%  ω=%.1f °/s",
+                   duty_ratio * 100.0f, yaw_rate);
+
+        /* stop ramping once turning briskly enough */
+        if (yaw_rate > MIN_ANG_VEL_DPS) break;
+
+        /* otherwise bump duty & iterate */
+        duty_ratio += RAMP_STEP;
+        if (duty_ratio > RAMP_MAX_DUTY) duty_ratio = RAMP_MAX_DUTY;
+
+        last_yaw     = yaw;
+        last_tick_ms = now_ms;
+    }
+    const float cruise_duty = duty_ratio;   /* remember last ramp duty */
+
+    /************************  MAIN CONTROL LOOP  ***************************/
+    unsigned long stable_ms   = 0;
+    float previous_error      = error;
+    float last_heading       = heading;
+
+    while (true)
+    {
+        unsigned long start_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+        heading = mpu_get_orientation().yaw;
+        error   = calculate_yaw_error(desired_heading, heading);
+        float abs_err = fabsf(error);
+
+        /* -------- check for static condition with small error -------- */
+        float heading_change = fabsf(calculate_yaw_error(heading, last_heading));
+        if (heading_change < 0.1f && abs_err < 10.0f) {  // Static and error < 10 degrees
+            log_remote("[TURN-SLOW] Static with small error (%.2f°), exiting turn", abs_err);
+            break;
+        }
+        last_heading = heading;
+
+        /* -------- overshoot brake -------- */
+        if ((previous_error > 0 && error < 0) ||
+            (previous_error < 0 && error > 0))
+        {
+            long brake = (long)(OVERSHOOT_BRAKE_DUTY * PWM_MAX_DUTY);
+            long right =  dir_sign * brake;                     /* invert OK  */
+            long left  = -dir_sign * brake * LEFT_FACTOR;
+            set_motor_speed(right, left);
+            log_remote("[TURN-SLOW] overshoot! brake %.0f %% for 200 ms",
+                       OVERSHOOT_BRAKE_DUTY * 100.0f);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            break;
+        }
+
+        /* -------- choose duty based on error magnitude -------- */
+        float cmd_ratio;      /* signed – positive = CCW torque */
+        if (abs_err >= COARSE_TO_PROP_DEG)
+        {
+            cmd_ratio = cruise_duty * dir_sign;                 /* coarse     */
+        }
+        else if (abs_err > BRAKE_ZONE_BEGIN_DEG)
+        {
+            /* linear fall 60 °→15 ° maps 0.60→0.0 duty */
+            float scale = (abs_err - BRAKE_ZONE_BEGIN_DEG) /
+                          (COARSE_TO_PROP_DEG - BRAKE_ZONE_BEGIN_DEG);
+            cmd_ratio = (MAX_PROP_DUTY * scale) * dir_sign;
+        }
+        else /* braking region */
+        {
+            /* linear rise 15 °→0 ° maps 0.0→0.25 reverse-torque */
+            float scale = (BRAKE_ZONE_BEGIN_DEG - abs_err) / BRAKE_ZONE_BEGIN_DEG;
+            cmd_ratio = -(MAX_BRAKE_DUTY * scale) * dir_sign;
+        }
+
+        /* -------- apply PWM to motors -------- */
+        long duty  = (long)(fabsf(cmd_ratio) * PWM_MAX_DUTY);
+        long right =  (cmd_ratio >= 0 ? +1 : -1) * duty;
+        long left  = -(cmd_ratio >= 0 ? +1 : -1) * duty * LEFT_FACTOR;
+        set_motor_speed(right, left);
+
+        log_remote("[TURN-SLOW] err %.2f°, cmd %.0f %% (right=%ld left=%ld)",
+                   error, fabsf(cmd_ratio) * 100.0f, right, left);
+
+        /* -------- stability / exit test -------- */
+        if (abs_err < MOTOR_TOLERANCE_DEG)
+        {
+            stable_ms += LOOP_PERIOD_MS;
+            if (stable_ms >= STABLE_TIME_REQUIRED_MS) break;
+        }
+        else stable_ms = 0;
+
+        previous_error = error;
+
+        /* wait remainder of control period */
+        vTaskDelay(pdMS_TO_TICKS(LOOP_PERIOD_MS));
+    }
+
+    motor_stop();
+    float final_heading = mpu_get_orientation().yaw;
+    float final_error   = calculate_yaw_error(desired_heading, final_heading);
+    log_remote("[TURN-SLOW] done – final heading %.2f° (err %.2f°)",
+               final_heading, final_error);
+}
+

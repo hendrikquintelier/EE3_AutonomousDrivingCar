@@ -31,24 +31,17 @@
 #define WIFI_PASSWORD "boenkie123"
 
 // Server configuration
-#define SERVER_IP "192.168.48.87"
+#define SERVER_IP "192.168.233.87"
 #define SERVER_PORT 1234
 
-#define MAX_BUFFER_SIZE 50
-#define MAX_ERROR_TIME_MS 10000 // 10 seconds
 #define MAX_MESSAGE_LENGTH 160
 #define MAX_WIFI_RETRY_COUNT 40  // Increased from 20 to 40 attempts
 #define WIFI_RETRY_DELAY_MS 2000 // Increased from 1000 to 2000ms
-
-typedef struct
-{
-    char message[MAX_MESSAGE_LENGTH];
-    uint32_t timestamp;
-} buffered_message_t;
+#define MAX_ERROR_TIME_MS 10000  // 10 seconds
 
 static int sock = -1;
 static struct sockaddr dest_addr;
-static char rx_buffer[128];
+
 static TaskHandle_t wifi_logger_task_handle = NULL;
 static EventGroupHandle_t wifi_event_group;
 static char server_ip[16];
@@ -59,14 +52,6 @@ static uint16_t server_port;
 #define MIN_LOG_INTERVAL_MS 200
 static uint32_t last_log_time = 0;
 static bool wifi_connected = false;
-static char wifi_ssid[32];
-static char wifi_password[64];
-
-// Message buffer
-static buffered_message_t message_buffer[MAX_BUFFER_SIZE];
-static int buffer_head = 0;
-static int buffer_tail = 0;
-static int buffer_count = 0;
 static uint32_t first_error_time = 0;
 static bool error_reported = false;
 
@@ -124,52 +109,6 @@ static void wifi_logger_task(void *pvParameters)
     {
         // Give other tasks a chance to run
         vTaskDelay(pdMS_TO_TICKS(100));
-    }
-}
-
-// Function to add message to buffer
-static bool add_to_buffer(const char *message, uint32_t timestamp)
-{
-    if (buffer_count >= MAX_BUFFER_SIZE)
-    {
-        return false; // Buffer full
-    }
-
-    strncpy(message_buffer[buffer_tail].message, message, MAX_MESSAGE_LENGTH - 1);
-    message_buffer[buffer_tail].message[MAX_MESSAGE_LENGTH - 1] = '\0';
-    message_buffer[buffer_tail].timestamp = timestamp;
-
-    buffer_tail = (buffer_tail + 1) % MAX_BUFFER_SIZE;
-    buffer_count++;
-    return true;
-}
-
-// Function to send buffered messages
-static void send_buffered_messages(void)
-{
-    while (buffer_count > 0 && wifi_connected)
-    {
-        // Send the oldest message
-        int err = sendto(sock, message_buffer[buffer_head].message,
-                         strlen(message_buffer[buffer_head].message), 0,
-                         &dest_addr, sizeof(dest_addr));
-
-        if (err < 0)
-        {
-            if (errno == 118)
-            { // Connection timeout
-                // Put the message back in the buffer
-                return;
-            }
-            break;
-        }
-
-        // Remove the sent message from buffer
-        buffer_head = (buffer_head + 1) % MAX_BUFFER_SIZE;
-        buffer_count--;
-
-        // Small delay between messages
-        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -423,19 +362,6 @@ esp_err_t wifi_logger_init(void)
 
     printf("WiFi logger initialized successfully - connecting to %s:%d\n", SERVER_IP, SERVER_PORT);
     return ESP_OK;
-}
-
-// Function to format timestamp
-static void format_timestamp(char *timestamp, size_t max_len, uint32_t ms_since_boot)
-{
-    uint32_t total_seconds = ms_since_boot / 1000;
-    uint32_t ms = ms_since_boot % 1000;
-    uint32_t hours = total_seconds / 3600;
-    uint32_t minutes = (total_seconds % 3600) / 60;
-    uint32_t seconds = total_seconds % 60;
-
-    snprintf(timestamp, max_len, "[%02lu:%02lu:%02lu.%03lu]",
-             hours, minutes, seconds, ms);
 }
 
 void log_remote(const char *format, ...)

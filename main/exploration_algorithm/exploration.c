@@ -10,8 +10,10 @@
 #include "Dijkstra.h"
 #include "navigate.h"
 #include "algorithm_structs_PUBLIC/Path.h"
-
+#include "../ultrasonic.h"
 #include "globals.h"
+
+#include "../track_navigation.h"
 
 int checkValidTrackCompletion();
 
@@ -34,35 +36,58 @@ int is_map_point()
     return (options > 0); // More than one option indicates a MapPoint
 }
 
+void update_ultrasonic_readings(void)
+{
+    ultrasonic_readings_t readings = ultrasonic_get_all();
+
+    // Update raw distance readings
+    front_distance_ultrasonic = readings.front;
+    left_distance_ultrasonic = readings.left;
+    right_distance_ultrasonic = readings.right;
+
+    // Set path detection flags based on 40cm threshold
+    ultrasonic_sensors[0] = (readings.front > 40.0f); // Front path
+    ultrasonic_sensors[1] = (readings.left > 40.0f);  // Left path
+    ultrasonic_sensors[2] = (readings.right > 40.0f); // Right path
+}
+
 /**
  * @brief Decides the next move based on ultrasonic sensor readings.
  */
 void decide_next_move()
 {
-    update_ultrasonic_sensors();
+    update_ultrasonic_readings();
+
+    // Log ultrasonic values for debugging
+    printf("[ULTRASONIC] Front: %.1f cm (Path: %s)\n", front_distance_ultrasonic, ultrasonic_sensors[0] ? "CLEAR" : "BLOCKED");
+    printf("[ULTRASONIC] Left:  %.1f cm (Path: %s)\n", left_distance_ultrasonic, ultrasonic_sensors[1] ? "CLEAR" : "BLOCKED");
+    printf("[ULTRASONIC] Right: %.1f cm (Path: %s)\n", right_distance_ultrasonic, ultrasonic_sensors[2] ? "CLEAR" : "BLOCKED");
 
     if (ultrasonic_sensors[0])
     {
-        move_forward(&current_car);
+        printf("[DECISION] Moving forward - path clear\n");
+        move_forward();
         return;
     }
 
     // If forward is blocked, try turning
     if (ultrasonic_sensors[1])
     {
-        rotate_left(&current_car);
-        move_forward(&current_car);
+        printf("[DECISION] Turning left - path clear\n");
+        turn_left();
+        move_forward();
     }
     else if (ultrasonic_sensors[2])
     {
-        rotate_right(&current_car);
-        move_forward(&current_car);
+        printf("[DECISION] Turning right - path clear\n");
+        turn_right();
+        move_forward();
     }
     else
     {
-        // No valid moves, perform a U-turn
-        rotate_right(&current_car);
-        rotate_right(&current_car);
+        printf("[DECISION] All paths blocked - turning opposite direction\n");
+        turn_opposite_direction();
+        move_forward();
     }
 }
 
@@ -140,10 +165,9 @@ void start_exploration()
 {
     while (1)
     {
-        print_grid(current_car);
 
         // Update sensor readings before each move
-        update_ultrasonic_sensors();
+        update_ultrasonic_readings();
         check_mappoints_tbd();
 
         // Check if the current position is a MapPoint
@@ -210,5 +234,5 @@ int checkValidTrackCompletion()
     return (current_car.current_location.x == start.x &&
             current_car.current_location.y == start.y &&
             num_map_points_all > 1 &&
-            current_car.current_orientation != opposite_direction(start_orientation));
+            current_car.current_orientation != get_opposite_direction(start_orientation));
 }

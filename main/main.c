@@ -3,61 +3,145 @@
 #include "freertos/task.h"
 #include "mpu.h"
 #include "wifi_logger.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
-#include "nvs_flash.h"
-#include "esp_netif.h"
-#include "esp_log.h"
-#include "lwip/err.h"
-#include "lwip/sys.h"
-#include <math.h>
-#include <float.h>
 #include "motorcontrol.h"
+#include "ultrasonic.h"
+#include "encoder.h"
+#include "exploration_algorithm/direction.h"
+#include "main_exploration.h"
 
-#define MOTOR_SPEED 0.7f // 70% speed
-
-// ============================================================================
-// Main Entry Point
-// ============================================================================
 void app_main(void)
 {
-    // Initialize WiFi
-    printf("Initializing WiFi...\n");
-    if (wifi_logger_init() != ESP_OK)
-    {
-        printf("Failed to initialize WiFi logger\n");
-        return;
-    }
-    printf("WiFi initialization complete\n");
-
-    // Initialize hardware
-    printf("Initializing MPU...\n");
-    if (mpu_init() != 0)
-    {
-        printf("Failed to initialize MPU\n");
-        return;
-    }
-    printf("MPU initialization complete\n");
-
-    printf("Initializing motors...\n");
+    // Initialize components
+    printf("[INIT] Starting system initialization\n");
+    wifi_logger_init();
+    mpu_init();
+    ultrasonic_init();
     motor_init();
-    printf("Motor initialization complete\n");
+    encoder_init();
+    printf("[INIT] System initialization complete\n");
 
-    // Wait for MPU to stabilize
-    printf("Waiting for MPU to stabilize...\n");
+    // Wait for everything to stabilize
     vTaskDelay(pdMS_TO_TICKS(2000));
-    printf("MPU stabilization complete\n");
+    start_exploration();
+}
 
-    // Start driving forward with yaw control
-    log_remote("Starting movement sequence...");
+void follow_single_track()
+{
+    // Set initial direction to North
+    Direction current_direction = NORTH;
+    printf("[NAV] Initial navigation direction set to NORTH\n");
 
-    // First turn 90 degrees right
-    log_remote("Performing 90-degree right turn...");
-    motor_turn_90(true);
+    while (1)
+    {
+        // Get ultrasonic readings
+        ultrasonic_readings_t readings = ultrasonic_get_all();
+        printf("[SENSOR] Distance readings:\n");
+        printf("  Front: %.1f cm (Threshold: 40.0 cm)\n", readings.front);
+        printf("  Left:  %.1f cm (Threshold: 40.0 cm)\n", readings.left);
+        printf("  Right: %.1f cm (Threshold: 40.0 cm)\n", readings.right);
 
-    // Then drive forward
-    // log_remote("Starting straight drive test...");
-    // motor_forward_constant_speed(MOTOR_SPEED);
+        // Decision making based on sensor readings
+        if (readings.front > 40.0f)
+        {
+            printf("[DECISION] Path clear ahead (%.1f cm > 40.0 cm)\n", readings.front);
+            printf("[ACTION] Executing forward movement\n");
+            drive_result_t result = motor_forward(0.0f, 0.0f);
+            printf("[RESULT] Movement completed:\n");
+            printf("  Final heading error: %.2f° (Target: 0.0°)\n", result.heading);
+            printf("  Final front distance: %.1f cm\n", result.ultrasonic.front);
+        }
+        else if (readings.left > 40.0f)
+        {
+            printf("[DECISION] Left path clear (%.1f cm > 40.0 cm)\n", readings.left);
+            printf("[ACTION] Planning left turn\n");
 
-    log_remote("Test complete!");
+            // Calculate new direction (current direction - 90 degrees)
+            Direction new_direction = (Direction)(((int)current_direction + 3) % 4);
+            printf("[TURN] Direction change required:\n");
+            printf("  Current: %s (%.0f°)\n",
+                   current_direction == NORTH ? "NORTH" : current_direction == EAST ? "EAST"
+                                                      : current_direction == SOUTH  ? "SOUTH"
+                                                                                    : "WEST",
+                   current_direction * 90.0f);
+            printf("  Target: %s (%.0f°)\n",
+                   new_direction == NORTH ? "NORTH" : new_direction == EAST ? "EAST"
+                                                  : new_direction == SOUTH  ? "SOUTH"
+                                                                            : "WEST",
+                   new_direction * 90.0f);
+
+            printf("[ACTION] Executing left turn\n");
+            motor_turn(new_direction);
+            current_direction = new_direction;
+
+            printf("[ACTION] Driving forward after turn\n");
+            drive_result_t result = motor_forward();
+            printf("[RESULT] Movement completed:\n");
+            printf("  Final heading error: %.2f° (Target: 0.0°)\n", result.heading);
+            printf("  Final front distance: %.1f cm\n", result.ultrasonic.front);
+        }
+        else if (readings.right > 40.0f)
+        {
+            printf("[DECISION] Right path clear (%.1f cm > 40.0 cm)\n", readings.right);
+            printf("[ACTION] Planning right turn\n");
+
+            // Calculate new direction (current direction + 90 degrees)
+            Direction new_direction = (Direction)(((int)current_direction + 1) % 4);
+            printf("[TURN] Direction change required:\n");
+            printf("  Current: %s (%.0f°)\n",
+                   current_direction == NORTH ? "NORTH" : current_direction == EAST ? "EAST"
+                                                      : current_direction == SOUTH  ? "SOUTH"
+                                                                                    : "WEST",
+                   current_direction * 90.0f);
+            printf("  Target: %s (%.0f°)\n",
+                   new_direction == NORTH ? "NORTH" : new_direction == EAST ? "EAST"
+                                                  : new_direction == SOUTH  ? "SOUTH"
+                                                                            : "WEST",
+                   new_direction * 90.0f);
+
+            printf("[ACTION] Executing right turn\n");
+            motor_turn(new_direction);
+            current_direction = new_direction;
+
+            printf("[ACTION] Driving forward after turn\n");
+            drive_result_t result = motor_forward();
+            printf("[RESULT] Movement completed:\n");
+            printf("  Final heading error: %.2f° (Target: 0.0°)\n", result.heading);
+            printf("  Final front distance: %.1f cm\n", result.ultrasonic.front);
+        }
+        else
+        {
+            printf("[DECISION] No clear path detected:\n");
+            printf("  Front: %.1f cm <= 40.0 cm\n", readings.front);
+            printf("  Left:  %.1f cm <= 40.0 cm\n", readings.left);
+            printf("  Right: %.1f cm <= 40.0 cm\n", readings.right);
+            printf("[ACTION] Planning 180-degree turn\n");
+
+            // Calculate new direction (current direction + 180 degrees)
+            Direction new_direction = (Direction)(((int)current_direction + 2) % 4);
+            printf("[TURN] Direction change required:\n");
+            printf("  Current: %s (%.0f°)\n",
+                   current_direction == NORTH ? "NORTH" : current_direction == EAST ? "EAST"
+                                                      : current_direction == SOUTH  ? "SOUTH"
+                                                                                    : "WEST",
+                   current_direction * 90.0f);
+            printf("  Target: %s (%.0f°)\n",
+                   new_direction == NORTH ? "NORTH" : new_direction == EAST ? "EAST"
+                                                  : new_direction == SOUTH  ? "SOUTH"
+                                                                            : "WEST",
+                   new_direction * 90.0f);
+
+            printf("[ACTION] Executing 180-degree turn\n");
+            motor_turn(new_direction);
+            current_direction = new_direction;
+
+            printf("[ACTION] Driving forward after turn\n");
+            drive_result_t result = motor_forward();
+            printf("[RESULT] Movement completed:\n");
+            printf("  Final heading error: %.2f° (Target: 0.0°)\n", result.heading);
+            printf("  Final front distance: %.1f cm\n", result.ultrasonic.front);
+        }
+
+        // Small delay between iterations
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
 }

@@ -1,25 +1,28 @@
 #ifndef ENCODER_H
 #define ENCODER_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
-    /**
-     * @brief Initializes both encoders (pins, ISRs).
-     */
+    // Initialize the encoder hardware and interrupts.
     void encoder_init(void);
 
-    /**
-     * @brief Returns the current count for a given encoder (1 or 2).
-     */
-    int encoder_get_count(int encoder_id);
+    // Reset both encoder counts to zero.
+    void encoder_reset(void);
 
-    /**
-     * @brief Resets the encoder count to 0.
-     */
-    void encoder_reset(int encoder_id);
+    // Get the raw pulse count from Encoder 1.
+    int32_t encoder_get_count1(void);
+
+    // Get the raw pulse count from Encoder 2.
+    int32_t encoder_get_count2(void);
+
+    // Calculate and return the average traveled distance (in centimeters)
+    // based on both encoders.
+    float encoder_get_distance(void);
 
 #ifdef __cplusplus
 }

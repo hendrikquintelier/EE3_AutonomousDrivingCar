@@ -1,4 +1,5 @@
 // mpu.c
+#include "ultrasonic.h"
 #include "mpu.h"
 #include "driver/i2c.h"
 #include "driver/gpio.h"
@@ -49,21 +50,39 @@
 #define ALPHA 0.98f              // Complementary filter coefficient
 #define GYRO_THRESHOLD 0.1f      // Threshold for yaw changes (°/s)
 #define CALIBRATION_SAMPLES 2000 // Number of calibration samples
-#define GYRO_SCALE 1.1f          // Yaw scaling factor
+#define GYRO_SCALE 1.0f          // Yaw scaling factor
+
+// ============================================================================
+// Ultrasonic Filter Parameters
+// ============================================================================
+#define FRONTAL_DISTANCE_ALPHA 0.15f     // Reduced from 0.3f for smoother transitions
+#define FRONTAL_DISTANCE_THRESHOLD 10.0f // Increased from 5.0f to handle larger changes
+#define FRONTAL_DISTANCE_MAX 400.0f      // Maximum valid distance in cm
+#define FRONTAL_DISTANCE_MIN 2.0f        // Minimum valid distance in cm
+#define FRONTAL_DISTANCE_STEP_MAX 50.0f  // Maximum allowed step change in cm
 
 // ============================================================================
 // State Variables
 // ============================================================================
 static struct
 {
-    float gyro[3];           // Current gyro readings
-    float accel[3];          // Current accelerometer readings
-    float angles[3];         // Current roll, pitch, yaw
-    float gyro_bias[3];      // Gyroscope bias values
-    float temp_bias;         // Temperature bias
-    float last_temp;         // Last temperature reading
-    uint64_t last_update_us; // Last update timestamp
-    bool initialized;        // Initialization status
+    float gyro[3];                   // Current gyro readings
+    float accel[3];                  // Current accelerometer readings
+    float angles[3];                 // Current roll, pitch, yaw
+    float gyro_bias[3];              // Gyroscope bias values
+    float accel_bias[3];             // Accelerometer bias values
+    float temp_bias;                 // Temperature bias
+    float last_temp;                 // Last temperature reading
+    uint64_t last_update_us;         // Last update timestamp
+    bool initialized;                // Initialization status
+    float filtered_frontal_distance; // Filtered frontal distance
+    float last_frontal_distance;     // Last raw frontal distance
+    float velocity_y;                // Current velocity in y direction
+    float position_y;                // Current position in y direction
+    float last_accel_y;              // Last acceleration in y direction
+    bool movement_started;           // Flag to track if movement has started
+    bool is_moving;                  // Flag to track if currently moving
+    uint32_t still_counter;          // Counter for detecting stillness
 } mpu_state = {0};
 
 static SemaphoreHandle_t mpu_mutex = NULL;
@@ -166,36 +185,6 @@ static void read_sensor_data(void)
     mpu_state.last_temp = current_temp;
 }
 
-static void update_orientation(void)
-{
-    uint64_t current_time_us = esp_timer_get_time();
-    float dt = (current_time_us - mpu_state.last_update_us) / 1000000.0f;
-    if (dt <= 0 || dt > 0.1f)
-        dt = 0.01f;
-    mpu_state.last_update_us = current_time_us;
-
-    // Calculate angles from accelerometer
-    float accel_roll = atan2f(mpu_state.accel[0], mpu_state.accel[2]) * 180.0f / M_PI;
-    float accel_pitch = atan2f(-mpu_state.accel[1], sqrtf(mpu_state.accel[0] * mpu_state.accel[0] +
-                                                          mpu_state.accel[2] * mpu_state.accel[2])) *
-                        180.0f / M_PI;
-
-    // Complementary filter
-    mpu_state.angles[0] = ALPHA * (mpu_state.angles[0] + mpu_state.gyro[1] * dt) +
-                          (1 - ALPHA) * accel_roll;
-    mpu_state.angles[1] = ALPHA * (mpu_state.angles[1] + mpu_state.gyro[0] * dt) +
-                          (1 - ALPHA) * accel_pitch;
-
-    // Update yaw with threshold and scaling
-    float filtered_gyro_z = (fabsf(mpu_state.gyro[2]) < GYRO_THRESHOLD) ? 0.0f : mpu_state.gyro[2];
-    mpu_state.angles[2] += filtered_gyro_z * dt * GYRO_SCALE;
-
-    // Normalize yaw to [0, 360)
-    mpu_state.angles[2] = fmodf(mpu_state.angles[2], 360.0f);
-    if (mpu_state.angles[2] < 0.0f)
-        mpu_state.angles[2] += 360.0f;
-}
-
 static void calibrate_gyro(void)
 {
     float sum[3] = {0}, sum_temp = 0;
@@ -225,6 +214,114 @@ static void calibrate_gyro(void)
     printf("Gyro calibration complete. Bias: X=%.3f, Y=%.3f, Z=%.3f deg/s, Temp=%.1f°C\n",
            mpu_state.gyro_bias[0], mpu_state.gyro_bias[1], mpu_state.gyro_bias[2],
            mpu_state.temp_bias + ROOM_TEMP_OFFSET);
+}
+
+static void calibrate_accel(void)
+{
+    float sum[3] = {0};
+    uint8_t data[6];
+
+    printf("Calibrating accelerometer - keep the sensor still...\n");
+
+    for (int i = 0; i < CALIBRATION_SAMPLES; i++)
+    {
+        mpu_read_regs(ACCEL_XOUT_H, data, 6);
+
+        for (int j = 0; j < 3; j++)
+        {
+            sum[j] += (int16_t)((data[j * 2] << 8) | data[j * 2 + 1]);
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    for (int i = 0; i < 3; i++)
+    {
+        mpu_state.accel_bias[i] = sum[i] / (CALIBRATION_SAMPLES * ACCEL_SENSITIVITY);
+    }
+
+    printf("Accel calibration complete. Bias: X=%.3f, Y=%.3f, Z=%.3f g\n",
+           mpu_state.accel_bias[0], mpu_state.accel_bias[1], mpu_state.accel_bias[2]);
+}
+
+static void update_orientation(void)
+{
+    /*--------------------------------------------------------------------
+     *  Time‐base
+     *------------------------------------------------------------------*/
+    uint64_t current_time_us = esp_timer_get_time();
+    float dt = (current_time_us - mpu_state.last_update_us) / 1e6f;   /* seconds */
+    if (dt <= 0.0f || dt > 0.1f) dt = 0.01f;                          /* clamp   */
+    mpu_state.last_update_us = current_time_us;
+
+    /*--------------------------------------------------------------------
+     *  Roll & Pitch from accelerometer
+     *------------------------------------------------------------------*/
+    float accel_roll  = atan2f(mpu_state.accel[0], mpu_state.accel[2]) *
+                        180.0f / M_PI;
+    float accel_pitch = atan2f(-mpu_state.accel[1],
+                        sqrtf(mpu_state.accel[0]*mpu_state.accel[0] +
+                              mpu_state.accel[2]*mpu_state.accel[2])) *
+                        180.0f / M_PI;
+
+    /*--------------------------------------------------------------------
+     *  Complementary filter
+     *------------------------------------------------------------------*/
+    mpu_state.angles[0] = ALPHA * (mpu_state.angles[0] +
+                          mpu_state.gyro[1] * dt) +
+                          (1.0f - ALPHA) * accel_roll;
+
+    mpu_state.angles[1] = ALPHA * (mpu_state.angles[1] +
+                          mpu_state.gyro[0] * dt) +
+                          (1.0f - ALPHA) * accel_pitch;
+
+    /*--------------------------------------------------------------------
+     *  Yaw — integrate Z-gyro
+     *  MPU-6050: +Z  = CCW.  Our convention: +yaw = CW  ⇒ subtract.
+     *------------------------------------------------------------------*/
+    float filtered_gyro_z = (fabsf(mpu_state.gyro[2]) < GYRO_THRESHOLD)
+                            ? 0.0f
+                            : mpu_state.gyro[2];
+
+    mpu_state.angles[2] -= filtered_gyro_z * dt * GYRO_SCALE;   /* CW-positive */
+
+    /* Wrap to [0, 360) */
+    mpu_state.angles[2] = fmodf(mpu_state.angles[2], 360.0f);
+    if (mpu_state.angles[2] < 0.0f)
+        mpu_state.angles[2] += 360.0f;
+
+    /*--------------------------------------------------------------------
+     *  Dead-reckoning distance along Y (unchanged)
+     *------------------------------------------------------------------*/
+    float accel_y = mpu_state.accel[1] - mpu_state.accel_bias[1]; /* g units */
+
+    /* noise gate & stillness detection */
+    if (fabsf(accel_y) < 0.05f) {                   /* 0.05 g threshold */
+        accel_y = 0.0f;
+        if (++mpu_state.still_counter > 10) {       /* >100 ms still    */
+            mpu_state.is_moving   = false;
+            mpu_state.velocity_y  = 0.0f;
+        }
+    } else {
+        mpu_state.still_counter = 0;
+        mpu_state.is_moving     = true;
+    }
+
+    /* reset when movement starts */
+    if (!mpu_state.movement_started && fabsf(accel_y) > 0.1f) {
+        mpu_state.movement_started = true;
+        mpu_state.velocity_y = 0.0f;
+        mpu_state.position_y = 0.0f;
+    }
+
+    /* convert to m · s⁻² */
+    accel_y *= 9.81f;
+
+    /* integrate */
+    if (mpu_state.is_moving) {
+        mpu_state.velocity_y += accel_y * dt;
+        mpu_state.velocity_y *= 0.85f;              /* damping */
+    }
+    mpu_state.position_y += mpu_state.velocity_y * dt;
 }
 
 static void mpu_task(void *pvParameters)
@@ -280,9 +377,10 @@ int mpu_init(void)
         return -1;
     }
 
-    // Perform gyroscope calibration
+    // Perform gyroscope and accelerometer calibration
     vTaskDelay(pdMS_TO_TICKS(1000));
     calibrate_gyro();
+    calibrate_accel();
 
     // Create MPU task
     if (xTaskCreate(mpu_task, "mpu_task", 4096, NULL, 5, &mpu_task_handle) != pdPASS)
@@ -330,4 +428,24 @@ void mpu_log_orientation(float current_yaw, float last_yaw, uint32_t print_inter
     log_remote("Yaw: %.2f° (Change: %.2f°/s)",
                current_yaw,
                yaw_change * (1000.0f / print_interval_ms));
+}
+
+float mpu_get_filtered_frontal_distance(void)
+{
+    if (!mpu_state.initialized)
+    {
+        printf("Warning: MPU6050 not initialized!\n");
+        return 0.0f;
+    }
+
+    // Return the calculated position (in centimeters)
+    return mpu_state.position_y * 100.0f; // Convert from meters to centimeters
+}
+
+// Add new function to reset movement tracking
+void mpu_reset_movement(void)
+{
+    mpu_state.movement_started = false;
+    mpu_state.velocity_y = 0.0f;
+    mpu_state.position_y = 0.0f;
 }

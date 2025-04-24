@@ -30,6 +30,17 @@ extern "C"
     // Log orientation data with change rate
     void mpu_log_orientation(float current_yaw, float last_yaw, uint32_t print_interval_ms);
 
+    /**
+     * @brief Gets the filtered frontal distance from the ultrasonic sensor
+     * @return float The filtered frontal distance in centimeters
+     */
+    float mpu_get_filtered_frontal_distance(void);
+
+    /**
+     * @brief Resets the movement tracking (position and velocity)
+     */
+    void mpu_reset_movement(void);
+
 #ifdef __cplusplus
 }
 #endif

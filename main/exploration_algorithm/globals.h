@@ -15,10 +15,15 @@ extern int num_all_fundamental_paths, capacity_all_fundamental_paths;
 extern Location start;
 extern Direction start_orientation;
 
+extern float front_distance_ultrasonic;
+extern float left_distance_ultrasonic;
+extern float right_distance_ultrasonic;
+
 // Define the Car struct
-typedef struct {
+typedef struct
+{
     Location current_location;
-    char current_orientation;
+    Direction current_orientation;
 } Car;
 
 // Global Car instance

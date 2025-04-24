@@ -4,12 +4,14 @@
 #include "FundamentalPath.h"
 #include <stdbool.h>
 
-typedef struct Location {
+typedef struct Location
+{
     int x;
     int y;
 } Location;
 
-typedef struct MapPoint {
+typedef struct MapPoint
+{
     int id;
     FundamentalPath *paths;
     int numberOfPaths;
@@ -33,5 +35,8 @@ MapPoint *check_map_point_already_exists();
 
 // Function to update an existing MapPoint and link it with the most recently added MapPoint
 void update_existing_mappoint(MapPoint *existing_point);
+
+// Function to log all map points and their connections
+void log_all_map_points();
 
 #endif // MAPPOINT_H

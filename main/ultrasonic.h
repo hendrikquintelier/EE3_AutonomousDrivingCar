@@ -1,6 +1,11 @@
 #ifndef ULTRASONIC_H
 #define ULTRASONIC_H
 
+#include "driver/gpio.h"
+#include "esp_timer.h"
+#include "wifi_logger.h"
+#include <string.h>
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -8,9 +13,9 @@ extern "C"
 
     typedef struct
     {
-        float left;
-        float front;
-        float right;
+        float front; // Index 0
+        float left;  // Index 1
+        float right; // Index 2
     } ultrasonic_readings_t;
 
     /**
@@ -20,6 +25,7 @@ extern "C"
 
     /**
      * @brief Returns all three distances in a single call.
+     * @return ultrasonic_readings_t containing left, front, and right distances in centimeters
      */
     ultrasonic_readings_t ultrasonic_get_all(void);
 

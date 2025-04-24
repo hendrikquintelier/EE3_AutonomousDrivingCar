@@ -4,6 +4,7 @@
 #include "globals.h"
 
 // Function declarations
-void start_exploration();
+void decide_next_move();
+void update_ultrasonic_readings(void);
 
 #endif // TRACK_EXPLORATION_H

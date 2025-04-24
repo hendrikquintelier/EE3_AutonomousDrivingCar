@@ -1,9 +1,21 @@
 idf_component_register(
-    SRCS "main.c"
+    SRCS "exploration_algorithm/globals.c"
+         "exploration_algorithm/algorithm_structs_PUBLIC/MapPoint.c"
+         "exploration_algorithm/algorithm_structs_PUBLIC/FundamentalPath.c"
+         "exploration_algorithm/algorithm_structs_PUBLIC/Path.c"
+         "exploration_algorithm/direction.c"
+         "exploration_algorithm/navigate.c"
+         "exploration_algorithm/Dijkstra.c"
+         "main.c"
          "motorcontrol.c"
          "ultrasonic.c"
          "mpu.c"
          "encoder.c"
          "wifi_logger.c"
+         "main_exploration.c"
+         "track_navigation.c"
+         
     INCLUDE_DIRS "."
+                 "exploration_algorithm"
+                 "exploration_algorithm/algorithm_structs_PUBLIC"
 )

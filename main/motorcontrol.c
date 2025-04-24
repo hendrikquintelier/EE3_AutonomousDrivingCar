@@ -153,8 +153,8 @@ static void wait_for_stop(unsigned long still_threshold_ms, drive_result_t *resu
         float distance_change = fabs(current_distance - coasting_last_distance);
         mpu_data_t orientation = mpu_get_orientation();
 
-        log_remote("Coasting - Distance: %.2f cm, Yaw: %.2f°, Distance change: %.2f cm",
-                   current_distance, orientation.yaw, distance_change);
+        // log_remote("Coasting - Distance: %.2f cm, Yaw: %.2f°, Distance change: %.2f cm",
+        //            current_distance, orientation.yaw, distance_change);
 
         if (distance_change < 0.1f)
         {
@@ -371,8 +371,10 @@ static float duty_profile(float duty_max,
 /* ───────────────────────────────────────────────────────────────────────────
  *  Refactored forward drive
  * ──────────────────────────────────────────────────────────────────────────*/
-drive_result_t motor_forward_distance(float heading_comp, float dist_comp)
+drive_result_t motor_forward()
 {
+    float heading_comp = 0.0f;
+    float dist_comp = 0.0f;
     /* Tunables ----------------------------------------------------------- */
     const float RAMP_START_DUTY = 0.30f; /* soft-start 30 %             */
     const float RAMP_STEP = 0.02f;       /* +2 % each loop              */
@@ -411,16 +413,13 @@ drive_result_t motor_forward_distance(float heading_comp, float dist_comp)
         target_dist = target_dist / cos(heading_comp * M_PI / 180.0f);
     }
 
-    // log_remote("[FWD] front=%.1f cm  offset=%.1f → target=%.1f cm",
-    //            front, raw_off, target_dist);
-
     /* 2 )  Setup -------------------------------------------------------- */
     drive_result_t result;
     encoder_reset();
 
-    float base_yaw = (float)current_direction * 90.0f; // Convert Direction enum to degrees (NORTH=0°, EAST=90°, SOUTH=180°, WEST=270°)
+    // Convert Direction enum to degrees (NORTH=0°, EAST=90°, SOUTH=180°, WEST=270°)
+    float base_yaw = (float)current_direction * 90.0f;
     float target_yaw = normalize_angle(base_yaw + heading_comp);
-    log_remote("[FWD] Current direction: %d (%.1f°), Target yaw: %.1f°", current_direction, base_yaw, target_yaw);
 
     float duty_ratio = RAMP_START_DUTY;
     float last_dist = 0.0f;
@@ -506,10 +505,6 @@ drive_result_t motor_forward_distance(float heading_comp, float dist_comp)
         long duty_b = (long)((duty_ratio + corr) * PWM_MAX_DUTY + 0.5f);
         set_motor_speed(duty_a, duty_b);
 
-        // log_remote("[FWD] d=%.2f/%.1f  v=%.1f cm/s  rem=%.1f  duty=%.0f%%  yawErr=%.1f°",
-        //            dist, target_dist, speed, remaining,
-        //            duty_ratio*100.0f, yaw_err);
-
         /* exit when we've covered the distance */
         if (dist >= target_dist)
             break;
@@ -584,7 +579,7 @@ void set_motor_turn(bool turn_right)
  *      measured speed < 10 cm·s-¹  (or until the max cruise duty is hit).
  *  2.  Once cruising, the duty is capped by the linear-deceleration profile
  *      (same as in the fast routine) so the bot eases into the stop point.
- *  3.  Heading is kept with the same PID used in `motor_forward_distance()`.
+ *  3.  Heading is kept with the same PID used in `motor_forward()`.
  *  4.  Instantaneous speed is logged (cm · s-¹).
  */
 /******************************************************************************
@@ -593,14 +588,9 @@ void set_motor_turn(bool turn_right)
  *  Slow, accurate 90 ° (cardinal) turn with soft-start / soft-stop.           *
  *  Heading convention: 0° = N, positive = CLOCK-WISE.                         *
  ******************************************************************************/
-void motor_turn_to_cardinal_slow(Direction target, float heading_offset)
+void motor_turn(Direction target)
 {
-    printf("[TURN_DEBUG] Starting turn to %s with offset %.1f°\n",
-           target == NORTH ? "NORTH" : target == EAST ? "EAST"
-                                   : target == SOUTH  ? "SOUTH"
-                                                      : "WEST",
-           heading_offset);
-
+    float heading_offset = 0.0f;
     /* ── parameters (unchanged) ─────────────────────────────────────── */
     const float LEFT_FACTOR = 1.0f;
     const float RAMP_START_DUTY = 0.15f, RAMP_MAX_DUTY = 0.65f, RAMP_STEP = 0.025f;
@@ -755,7 +745,7 @@ void test_navigation(void)
                    current_dir == NORTH ? "NORTH" : current_dir == EAST ? "EAST"
                                                 : current_dir == SOUTH  ? "SOUTH"
                                                                         : "WEST");
-        drive_result_t result = motor_forward_distance(0.0f, 0.0f);
+        drive_result_t result = motor_forward();
         log_remote("[Square Test] Forward complete - Heading error: %.2f°, Front distance: %.1f cm",
                    result.heading, result.ultrasonic.front);
 
@@ -770,7 +760,7 @@ void test_navigation(void)
                    next_dir == NORTH ? "NORTH" : next_dir == EAST ? "EAST"
                                              : next_dir == SOUTH  ? "SOUTH"
                                                                   : "WEST");
-        motor_turn_to_cardinal_slow(next_dir, 0.0f);
+        motor_turn(next_dir);
 
         // Wait a bit between movements
         vTaskDelay(pdMS_TO_TICKS(1000));

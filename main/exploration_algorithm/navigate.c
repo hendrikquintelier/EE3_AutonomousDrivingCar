@@ -2,6 +2,27 @@
 #include "globals.h"
 #include "algorithm_structs_PUBLIC/Path.h"
 #include "algorithm_structs_PUBLIC/MapPoint.h"
+#include "../motorcontrol.h"
+#include "exploration.h"
+#include "../track_navigation.h"
+
+/**
+ * @brief Rotates the car towards an unexplored fundamental path at the given MapPoint.
+ *
+ * @param mp Pointer to the MapPoint structure.
+ */
+void turn_to_undiscovered_fundamental_path(MapPoint *mp)
+{
+    for (int i = 0; i < mp->numberOfPaths; i++)
+    {
+        // Check for an unexplored path
+        if (mp->paths[i].end == NULL)
+        {
+            current_car.current_orientation = mp->paths[i].direction;
+            break;
+        }
+    }
+}
 
 /**
  * @brief Rotates the car to face the specified direction.
@@ -50,8 +71,7 @@ void navigate_path(const Path *p)
         // Move forward along the path
         for (int j = 0; j < step->distance; j++)
         {
-            move_forward(); // ERROR bcs doesn't exist
-            print_grid();   // Visualize movement on the grid
+            move_forward();
         }
 
         // Update the car's position after completing the movement
@@ -60,22 +80,4 @@ void navigate_path(const Path *p)
 
     // Adjust the car's orientation after reaching the final destination
     turn_to_undiscovered_fundamental_path(p->end);
-}
-
-/**
- * @brief Rotates the car towards an unexplored fundamental path at the given MapPoint.
- *
- * @param mp Pointer to the MapPoint structure.
- */
-void turn_to_undiscovered_fundamental_path(MapPoint *mp)
-{
-    for (int i = 0; i < mp->numberOfPaths; i++)
-    {
-        // Check for an unexplored path
-        if (mp->paths[i].end == NULL)
-        {
-            current_car.current_orientation = mp->paths[i].direction;
-            break;
-        }
-    }
 }

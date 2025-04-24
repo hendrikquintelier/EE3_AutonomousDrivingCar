@@ -43,22 +43,14 @@ typedef struct
 // Initialize the motor control system
 void motor_init(void);
 
-// Drive forward at constant speed with yaw control
-void motor_forward_constant_speed(float speed);
-
-// Set motor direction
-void motor_set_direction(int motor, int direction);
-
-void motor_turn_to_cardinal(Direction target, float heading_offset);
-
 // Slow variant of turn to cardinal function
-void motor_turn_to_cardinal_slow(Direction target, float heading_offset);
+void motor_turn(Direction target);
 
 // Stop all motors
 void motor_stop(void);
 
 // Updated function signature to accept compensation parameters and return results
-drive_result_t motor_forward_distance(float heading_compensation, float distance_compensation);
+drive_result_t motor_forward();
 
 // Control structures
 typedef struct

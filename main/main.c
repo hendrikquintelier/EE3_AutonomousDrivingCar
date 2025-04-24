@@ -7,6 +7,7 @@
 #include "ultrasonic.h"
 #include "encoder.h"
 #include "exploration_algorithm/direction.h"
+#include "main_exploration.h"
 
 void app_main(void)
 {
@@ -21,7 +22,11 @@ void app_main(void)
 
     // Wait for everything to stabilize
     vTaskDelay(pdMS_TO_TICKS(2000));
+    start_exploration();
+}
 
+void follow_single_track()
+{
     // Set initial direction to North
     Direction current_direction = NORTH;
     printf("[NAV] Initial navigation direction set to NORTH\n");
@@ -40,7 +45,7 @@ void app_main(void)
         {
             printf("[DECISION] Path clear ahead (%.1f cm > 40.0 cm)\n", readings.front);
             printf("[ACTION] Executing forward movement\n");
-            drive_result_t result = motor_forward_distance(0.0f, 0.0f);
+            drive_result_t result = motor_forward(0.0f, 0.0f);
             printf("[RESULT] Movement completed:\n");
             printf("  Final heading error: %.2f° (Target: 0.0°)\n", result.heading);
             printf("  Final front distance: %.1f cm\n", result.ultrasonic.front);
@@ -65,11 +70,11 @@ void app_main(void)
                    new_direction * 90.0f);
 
             printf("[ACTION] Executing left turn\n");
-            motor_turn_to_cardinal_slow(new_direction, 0.0f);
+            motor_turn(new_direction);
             current_direction = new_direction;
 
             printf("[ACTION] Driving forward after turn\n");
-            drive_result_t result = motor_forward_distance(0.0f, 0.0f);
+            drive_result_t result = motor_forward();
             printf("[RESULT] Movement completed:\n");
             printf("  Final heading error: %.2f° (Target: 0.0°)\n", result.heading);
             printf("  Final front distance: %.1f cm\n", result.ultrasonic.front);
@@ -94,11 +99,11 @@ void app_main(void)
                    new_direction * 90.0f);
 
             printf("[ACTION] Executing right turn\n");
-            motor_turn_to_cardinal_slow(new_direction, 0.0f);
+            motor_turn(new_direction);
             current_direction = new_direction;
 
             printf("[ACTION] Driving forward after turn\n");
-            drive_result_t result = motor_forward_distance(0.0f, 0.0f);
+            drive_result_t result = motor_forward();
             printf("[RESULT] Movement completed:\n");
             printf("  Final heading error: %.2f° (Target: 0.0°)\n", result.heading);
             printf("  Final front distance: %.1f cm\n", result.ultrasonic.front);
@@ -126,11 +131,11 @@ void app_main(void)
                    new_direction * 90.0f);
 
             printf("[ACTION] Executing 180-degree turn\n");
-            motor_turn_to_cardinal_slow(new_direction, 0.0f);
+            motor_turn(new_direction);
             current_direction = new_direction;
 
             printf("[ACTION] Driving forward after turn\n");
-            drive_result_t result = motor_forward_distance(0.0f, 0.0f);
+            drive_result_t result = motor_forward();
             printf("[RESULT] Movement completed:\n");
             printf("  Final heading error: %.2f° (Target: 0.0°)\n", result.heading);
             printf("  Final front distance: %.1f cm\n", result.ultrasonic.front);

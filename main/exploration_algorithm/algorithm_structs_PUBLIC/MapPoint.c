@@ -9,6 +9,7 @@
 #include "MapPoint.h"
 #include "FundamentalPath.h"
 #include "../direction.h"
+#include "../wifi_logger.h"
 
 // ======================= GLOBAL VARIABLES ======================= //
 
@@ -26,47 +27,60 @@ static int map_point_counter = 0;
  * @param location The location (x, y) of the MapPoint.
  * @param UltraSonicDetection Boolean array indicating detected paths (forward, left, right).
  */
-void initialize_map_point(MapPoint *mp, Location location, bool UltraSonicDetection[3]) {
-    if (!mp) {
-        perror("Error: Null pointer passed to initialize_map_point");
+void initialize_map_point(MapPoint *mp, Location location, bool UltraSonicDetection[3])
+{
+    if (!mp)
+    {
+        log_remote("Error: Null pointer passed to initialize_map_point\n");
         return;
     }
 
     // Assign a unique ID and store the location
     mp->id = map_point_counter++;
     mp->location = location;
+    log_remote("Initializing MapPoint %d at location (%d, %d)\n", mp->id, location.x, location.y);
 
     // Count the number of detected paths
     int pathCount = 0;
-    for (int i = 0; i < 3; ++i) {
-        if (UltraSonicDetection[i]) pathCount++;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (UltraSonicDetection[i])
+            pathCount++;
     }
     mp->numberOfPaths = pathCount;
+    log_remote("Number of paths detected: %d\n", pathCount);
 
     // Allocate memory for paths
     mp->paths = malloc(pathCount * sizeof(FundamentalPath));
-    if (!mp->paths) {
-        perror("Error: Failed to allocate memory for FundamentalPaths");
+    if (!mp->paths)
+    {
+        log_remote("Error: Failed to allocate memory for FundamentalPaths\n");
         exit(EXIT_FAILURE);
     }
 
     // Initialize detected paths and assign corresponding directions
     int pathIndex = 0;
-    for (int i = 0; i < 3; ++i) {
-        if (UltraSonicDetection[i]) {
+    for (int i = 0; i < 3; ++i)
+    {
+        if (UltraSonicDetection[i])
+        {
             initialize_fundamental_path(&mp->paths[pathIndex], mp, 0);
 
             // Assign direction based on sensor index
-            switch (i) {
-                case 0:
-                    mp->paths[pathIndex].direction = (Direction) current_car.current_orientation;
-                    break; // Forward
-                case 1:
-                    mp->paths[pathIndex].direction = turn_left(current_car.current_orientation);
-                    break; // Left
-                case 2:
-                    mp->paths[pathIndex].direction = turn_right(current_car.current_orientation);
-                    break; // Right
+            switch (i)
+            {
+            case 0:
+                mp->paths[pathIndex].direction = (Direction)current_car.current_orientation;
+                log_remote("Path %d: Forward direction %s\n", pathIndex + 1, direction_to_string(mp->paths[pathIndex].direction));
+                break; // Forward
+            case 1:
+                mp->paths[pathIndex].direction = get_orientation_on_the_left(current_car.current_orientation);
+                log_remote("Path %d: Left direction %s\n", pathIndex + 1, direction_to_string(mp->paths[pathIndex].direction));
+                break; // Left
+            case 2:
+                mp->paths[pathIndex].direction = get_orientation_on_the_right(current_car.current_orientation);
+                log_remote("Path %d: Right direction %s\n", pathIndex + 1, direction_to_string(mp->paths[pathIndex].direction));
+                break; // Right
             }
 
             pathIndex++;
@@ -74,19 +88,24 @@ void initialize_map_point(MapPoint *mp, Location location, bool UltraSonicDetect
     }
 
     // Add to the global MapPoint array, resizing if necessary
-    if (num_map_points_all == capacity_map_points_all) {
+    if (num_map_points_all == capacity_map_points_all)
+    {
         capacity_map_points_all *= 2;
         map_points_all = realloc(map_points_all, capacity_map_points_all * sizeof(MapPoint));
-        if (!map_points_all) {
-            perror("Error: Failed to resize map_points_all array");
+        if (!map_points_all)
+        {
+            log_remote("Error: Failed to resize map_points_all array\n");
             exit(EXIT_FAILURE);
         }
     }
     map_points_all[num_map_points_all++] = mp;
+    log_remote("MapPoint %d added to global array. Total MapPoints: %d\n", mp->id, num_map_points_all);
 
     // If the MapPoint has unexplored paths, add it to the "To Be Discovered" list
-    if (mp_has_unexplored_paths(mp)) {
+    if (mp_has_unexplored_paths(mp))
+    {
         add_map_point_tbd(mp);
+        log_remote("MapPoint %d added to To Be Discovered list\n", mp->id);
     }
 }
 
@@ -95,19 +114,24 @@ void initialize_map_point(MapPoint *mp, Location location, bool UltraSonicDetect
  *
  * @param mp Pointer to the MapPoint to be added.
  */
-void add_map_point_tbd(MapPoint *mp) {
-    if (num_map_points_tbd == capacity_map_points_tbd) {
+void add_map_point_tbd(MapPoint *mp)
+{
+    if (num_map_points_tbd == capacity_map_points_tbd)
+    {
         capacity_map_points_tbd *= 2;
         map_points_tbd = realloc(map_points_tbd, capacity_map_points_tbd * sizeof(MapPoint));
-        if (!map_points_tbd) {
+        if (!map_points_tbd)
+        {
             perror("Error: Failed to expand map_points_tbd array");
             exit(EXIT_FAILURE);
         }
     }
 
     // Avoid adding the start point (ID 0)
-    if (mp->id != 0) {
+    if (mp->id != 0)
+    {
         map_points_tbd[num_map_points_tbd++] = mp;
+        log_all_map_points(); // Log after adding to TBD list
     }
 }
 
@@ -117,10 +141,13 @@ void add_map_point_tbd(MapPoint *mp) {
  * @param mp Pointer to the MapPoint being checked.
  * @return int 1 if there are unexplored paths, otherwise 0.
  */
-int mp_has_unexplored_paths(MapPoint *mp) {
-    for (int i = 0; i < mp->numberOfPaths; i++) {
-        if (mp->paths[i].end == NULL) {
-            return 1;  // Found an unexplored path
+int mp_has_unexplored_paths(MapPoint *mp)
+{
+    for (int i = 0; i < mp->numberOfPaths; i++)
+    {
+        if (mp->paths[i].end == NULL)
+        {
+            return 1; // Found an unexplored path
         }
     }
     return 0;
@@ -131,29 +158,35 @@ int mp_has_unexplored_paths(MapPoint *mp) {
  *
  * @param mp Pointer to the MapPoint to print.
  */
-void print_map_point(const MapPoint *mp) {
-    if (!mp) {
-        printf("Error: Null MapPoint passed to print_map_point.\n");
+void print_map_point(const MapPoint *mp)
+{
+    if (!mp)
+    {
+        log_remote("Error: Null MapPoint passed to print_map_point.\n");
         return;
     }
 
-    printf("\n========== MapPoint Info ==========\n");
-    printf("ID: %d\n", mp->id);
-    printf("Location: (%d, %d)\n", mp->location.x, mp->location.y);
-    printf("Number of Paths: %d\n", mp->numberOfPaths);
-    printf("------------------------------------\n");
+    log_remote("\n========== MapPoint Info ==========\n");
+    log_remote("ID: %d\n", mp->id);
+    log_remote("Location: (%d, %d)\n", mp->location.x, mp->location.y);
+    log_remote("Number of Paths: %d\n", mp->numberOfPaths);
+    log_remote("------------------------------------\n");
 
-    for (int i = 0; i < mp->numberOfPaths; ++i) {
-        printf("  Path %d -> ", i + 1);
-        if (mp->paths[i].end) {
-            printf("Leads to MapPoint ID: %d, Distance: %d ", mp->paths[i].end->id, mp->paths[i].distance);
-        } else {
-            printf("Leads to: Unknown ");
+    for (int i = 0; i < mp->numberOfPaths; ++i)
+    {
+        log_remote("  Path %d -> ", i + 1);
+        if (mp->paths[i].end)
+        {
+            log_remote("Leads to MapPoint ID: %d, Distance: %d ", mp->paths[i].end->id, mp->paths[i].distance);
         }
-        printf("[Direction: %s]\n", direction_to_string(mp->paths[i].direction));
+        else
+        {
+            log_remote("Leads to: Unknown ");
+        }
+        log_remote("[Direction: %s]\n", direction_to_string(mp->paths[i].direction));
     }
 
-    printf("====================================\n");
+    log_remote("====================================\n");
 }
 
 /**
@@ -161,10 +194,13 @@ void print_map_point(const MapPoint *mp) {
  *
  * @return MapPoint* Pointer to the existing MapPoint, or NULL if not found.
  */
-MapPoint *check_map_point_already_exists() {
-    for (int i = 0; i < num_map_points_all; i++) {
+MapPoint *check_map_point_already_exists()
+{
+    for (int i = 0; i < num_map_points_all; i++)
+    {
         if (map_points_all[i]->location.x == current_car.current_location.x &&
-            map_points_all[i]->location.y == current_car.current_location.y) {
+            map_points_all[i]->location.y == current_car.current_location.y)
+        {
             return map_points_all[i];
         }
     }
@@ -178,7 +214,8 @@ MapPoint *check_map_point_already_exists() {
  * @param b Second location.
  * @return int The calculated Manhattan distance.
  */
-int calculate_distance(Location a, Location b) {
+int calculate_distance(Location a, Location b)
+{
     return abs(a.x - b.x) + abs(a.y - b.y);
 }
 
@@ -187,8 +224,10 @@ int calculate_distance(Location a, Location b) {
  *
  * @param existing_point Pointer to the existing MapPoint.
  */
-void update_existing_mappoint(MapPoint *existing_point) {
-    if (num_map_points_all < 2) {
+void update_existing_mappoint(MapPoint *existing_point)
+{
+    if (num_map_points_all < 2)
+    {
         printf("Error: Not enough MapPoints to establish a connection.\n");
         return;
     }
@@ -197,13 +236,15 @@ void update_existing_mappoint(MapPoint *existing_point) {
 
     // Determine direction and distance
     Direction existing_to_latest = determine_direction(existing_point, latest_point);
-    Direction latest_to_existing = opposite_direction(existing_to_latest);
+    Direction latest_to_existing = get_opposite_direction(existing_to_latest);
     int distance = calculate_distance(existing_point->location, latest_point->location);
 
     // Search for existing paths and update if necessary
     int updated = 0;
-    for (int i = 0; i < existing_point->numberOfPaths; i++) {
-        if (existing_point->paths[i].direction == existing_to_latest) {
+    for (int i = 0; i < existing_point->numberOfPaths; i++)
+    {
+        if (existing_point->paths[i].direction == existing_to_latest)
+        {
             existing_point->paths[i].end = latest_point;
             existing_point->paths[i].distance = distance;
             updated = 1;
@@ -211,7 +252,8 @@ void update_existing_mappoint(MapPoint *existing_point) {
         }
     }
 
-    if (!updated) {
+    if (!updated)
+    {
         // Allocate new paths dynamically
         existing_point->paths = realloc(existing_point->paths, (existing_point->numberOfPaths + 1) * sizeof(FundamentalPath));
         initialize_fundamental_path(&existing_point->paths[existing_point->numberOfPaths], existing_point, distance);
@@ -219,4 +261,41 @@ void update_existing_mappoint(MapPoint *existing_point) {
         existing_point->paths[existing_point->numberOfPaths].direction = existing_to_latest;
         existing_point->numberOfPaths++;
     }
+
+    log_all_map_points(); // Log after updating existing map point
+}
+
+/**
+ * @brief Logs all map points and their connections to the remote logger.
+ */
+void log_all_map_points()
+{
+    log_remote("\n===== Current Map Points =====\n");
+    log_remote("Total Map Points: %d\n", num_map_points_all);
+    log_remote("Map Points To Be Discovered: %d\n", num_map_points_tbd);
+
+    for (int i = 0; i < num_map_points_all; i++)
+    {
+        MapPoint *mp = map_points_all[i];
+        log_remote("\nMap Point %d at (%d, %d):\n",
+                   mp->id, mp->location.x, mp->location.y);
+
+        for (int j = 0; j < mp->numberOfPaths; j++)
+        {
+            FundamentalPath *path = &mp->paths[j];
+            log_remote("  Path %d: Direction %s, ",
+                       j + 1, direction_to_string(path->direction));
+
+            if (path->end)
+            {
+                log_remote("connects to Map Point %d (Distance: %d)\n",
+                           path->end->id, path->distance);
+            }
+            else
+            {
+                log_remote("unexplored\n");
+            }
+        }
+    }
+    log_remote("\n=============================\n");
 }

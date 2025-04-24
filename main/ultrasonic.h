@@ -13,9 +13,9 @@ extern "C"
 
     typedef struct
     {
-        float left;
-        float front;
-        float right;
+        float front; // Index 0
+        float left;  // Index 1
+        float right; // Index 2
     } ultrasonic_readings_t;
 
     /**

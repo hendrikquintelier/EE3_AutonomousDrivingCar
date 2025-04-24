@@ -1,17 +1,16 @@
 #include "ultrasonic.h"
-#include "wifi_logger.h" // For log_remote
-#include <string.h>      // For strcpy
+#include <string.h>
 #include <stdio.h>
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-// Pin assignments (adjust to your wiring)
-#define TRIG_LEFT GPIO_NUM_40
-#define ECHO_LEFT GPIO_NUM_39
+// Pin assignments (0: front, 1: left, 2: right)
 #define TRIG_FRONT GPIO_NUM_42
 #define ECHO_FRONT GPIO_NUM_41
+#define TRIG_LEFT GPIO_NUM_40
+#define ECHO_LEFT GPIO_NUM_39
 #define TRIG_RIGHT GPIO_NUM_1
 #define ECHO_RIGHT GPIO_NUM_2
 
@@ -30,16 +29,18 @@ static float measure_distance(gpio_num_t trig_pin, gpio_num_t echo_pin);
 
 void ultrasonic_init(void)
 {
-    init_ultrasonic_sensor(TRIG_LEFT, ECHO_LEFT);
+    // Initialize sensors in order: front (0), left (1), right (2)
     init_ultrasonic_sensor(TRIG_FRONT, ECHO_FRONT);
+    init_ultrasonic_sensor(TRIG_LEFT, ECHO_LEFT);
     init_ultrasonic_sensor(TRIG_RIGHT, ECHO_RIGHT);
 }
 
 ultrasonic_readings_t ultrasonic_get_all(void)
 {
     ultrasonic_readings_t readings;
-    readings.left = measure_distance(TRIG_LEFT, ECHO_LEFT);
+    // Read sensors in order: front (0), left (1), right (2)
     readings.front = measure_distance(TRIG_FRONT, ECHO_FRONT);
+    readings.left = measure_distance(TRIG_LEFT, ECHO_LEFT);
     readings.right = measure_distance(TRIG_RIGHT, ECHO_RIGHT);
     return readings;
 }
@@ -75,15 +76,6 @@ static float measure_distance(gpio_num_t trig_pin, gpio_num_t echo_pin)
 {
     float sum_distance = 0.0f;
     int valid_samples = 0;
-    char sensor_name[10];
-
-    // Set sensor name for logging
-    if (trig_pin == TRIG_FRONT)
-        strcpy(sensor_name, "Front");
-    else if (trig_pin == TRIG_LEFT)
-        strcpy(sensor_name, "Left");
-    else
-        strcpy(sensor_name, "Right");
 
     // Take multiple samples and average them
     for (int i = 0; i < NUM_SAMPLES; i++)
@@ -108,7 +100,6 @@ static float measure_distance(gpio_num_t trig_pin, gpio_num_t echo_pin)
         }
         if (wait_time >= MAX_WAIT_US)
         {
-            log_remote("%s sensor: No echo received (timeout waiting for HIGH) - Check wiring and power", sensor_name);
             continue; // Skip this sample
         }
         start_time = esp_timer_get_time();
@@ -122,7 +113,6 @@ static float measure_distance(gpio_num_t trig_pin, gpio_num_t echo_pin)
         }
         if (wait_time >= MAX_WAIT_US)
         {
-            log_remote("%s sensor: Echo never went LOW (timeout) - Check wiring and power", sensor_name);
             continue; // Skip this sample
         }
         end_time = esp_timer_get_time();
@@ -130,21 +120,9 @@ static float measure_distance(gpio_num_t trig_pin, gpio_num_t echo_pin)
         // 4. Calculate duration and validate timing
         float duration_us = (float)(end_time - start_time);
 
-        // Log raw timing data
-        log_remote("%s sensor: Echo duration = %.1f µs, Start time = %llu, End time = %llu",
-                   sensor_name, duration_us, start_time, end_time);
-
         // Validate echo duration is within expected range
-        if (duration_us < MIN_ECHO_TIME)
+        if (duration_us < MIN_ECHO_TIME || duration_us > MAX_ECHO_TIME)
         {
-            log_remote("%s sensor: Echo too short (%.1f µs < %.1f µs) - Check for interference",
-                       sensor_name, duration_us, (float)MIN_ECHO_TIME);
-            continue; // Skip this sample
-        }
-        if (duration_us > MAX_ECHO_TIME)
-        {
-            log_remote("%s sensor: Echo too long (%.1f µs > %.1f µs) - Check for interference",
-                       sensor_name, duration_us, (float)MAX_ECHO_TIME);
             continue; // Skip this sample
         }
 
@@ -152,16 +130,8 @@ static float measure_distance(gpio_num_t trig_pin, gpio_num_t echo_pin)
         float distance_cm = (duration_us * SPEED_OF_SOUND) / 2.0f;
 
         // 6. Validate final distance
-        if (distance_cm < MIN_DISTANCE)
+        if (distance_cm < MIN_DISTANCE || distance_cm > MAX_DISTANCE)
         {
-            log_remote("%s sensor: Distance too small (%.1f cm < %.1f cm) - Object too close",
-                       sensor_name, distance_cm, MIN_DISTANCE);
-            continue; // Skip this sample
-        }
-        if (distance_cm > MAX_DISTANCE)
-        {
-            log_remote("%s sensor: Distance too large (%.1f cm > %.1f cm) - No object detected",
-                       sensor_name, distance_cm, MAX_DISTANCE);
             continue; // Skip this sample
         }
 
@@ -172,12 +142,8 @@ static float measure_distance(gpio_num_t trig_pin, gpio_num_t echo_pin)
     // Return average of valid samples, or -1 if no valid samples
     if (valid_samples > 0)
     {
-        float avg_distance = sum_distance / valid_samples;
-        log_remote("%s sensor: Final distance = %.1f cm (from %d valid samples)",
-                   sensor_name, avg_distance, valid_samples);
-        return avg_distance;
+        return sum_distance / valid_samples;
     }
 
-    log_remote("%s sensor: No valid samples obtained - Check sensor wiring and power", sensor_name);
     return -1.0f;
 }

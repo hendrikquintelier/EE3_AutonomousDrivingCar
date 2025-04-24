@@ -137,7 +137,7 @@ void update_latest_fundamental_path(MapPoint *current, MapPoint *former)
 
     // Determine directions between the two MapPoints
     Direction fc_direction = determine_direction(former, current);
-    Direction cf_direction = opposite_direction(fc_direction);
+    Direction cf_direction = get_opposite_direction(fc_direction);
 
     FundamentalPath *fc_pointer_fundamental_path = NULL;
     FundamentalPath *cf_pointer_fundamental_path = NULL;

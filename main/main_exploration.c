@@ -6,7 +6,6 @@
 #include "exploration_algorithm/algorithm_structs_PUBLIC/Path.h"
 #include "exploration_algorithm/direction.h"
 #include "motorcontrol.h"
-#include "exploration_algorithm/exploration.h"
 #include "exploration_algorithm/Dijkstra.h"
 #include "exploration_algorithm/navigate.h"
 #include "track_navigation.h"
@@ -23,9 +22,9 @@ void update_ultrasonic_readings(void)
     right_distance_ultrasonic = readings.right;
 
     // Set path detection flags based on 40cm threshold
-    ultrasonic_sensors[0] = (readings.front > 40.0f); // Front path
-    ultrasonic_sensors[1] = (readings.left > 40.0f);  // Left path
-    ultrasonic_sensors[2] = (readings.right > 40.0f); // Right path
+    ultrasonic_sensors[0] = (readings.front > 30.0f); // Front path
+    ultrasonic_sensors[1] = (readings.left > 35.0f);  // Left path
+    ultrasonic_sensors[2] = (readings.right > 35.0f); // Right path
 }
 
 int is_map_point()
@@ -128,6 +127,41 @@ void existing_map_point_algorithm(MapPoint *existing_point)
         update_latest_fundamental_path(existing_point, former_map_point);
     }
 
+    // Check if we're at the start point in the wrong direction
+    if (existing_point->location.x == start.x &&
+        existing_point->location.y == start.y &&
+        current_car.current_orientation == get_opposite_direction(start_orientation))
+    {
+        log_remote("[NAVIGATE] At start point in wrong direction, turning to correct orientation\n");
+        turn_opposite_direction();
+        move_forward(); // Add forward movement after the turn
+        return;
+    }
+
+    // Check for dead ends
+    if (!ultrasonic_sensors[0] && !ultrasonic_sensors[1] && !ultrasonic_sensors[2])
+    {
+        // Mark the path we came from as a dead end
+        if (former_map_point)
+        {
+            for (int i = 0; i < former_map_point->numberOfPaths; i++)
+            {
+                if (former_map_point->paths[i].end == existing_point)
+                {
+                    former_map_point->paths[i].dead_end = true;
+                    log_remote("[NAVIGATE] Marked path from (%d,%d) to (%d,%d) as dead end\n",
+                               former_map_point->location.x, former_map_point->location.y,
+                               existing_point->location.x, existing_point->location.y);
+                    break;
+                }
+            }
+        }
+        // Turn around and go back
+        turn_opposite_direction();
+        move_forward();
+        return;
+    }
+
     // Check for unexplored paths at the current MapPoint
     int unexplored_paths = 0;
     for (int i = 0; i < existing_point->numberOfPaths; i++)
@@ -142,7 +176,74 @@ void existing_map_point_algorithm(MapPoint *existing_point)
 
     if (unexplored_paths > 0)
     {
-        decide_next_move();
+        // Try to find a non-dead-end path
+        bool found_valid_path = false;
+
+        // Check forward path
+        if (ultrasonic_sensors[0])
+        {
+            bool forward_dead_end = false;
+            for (int i = 0; i < existing_point->numberOfPaths; i++)
+            {
+                if (existing_point->paths[i].direction == current_car.current_orientation)
+                {
+                    forward_dead_end = existing_point->paths[i].dead_end;
+                    break;
+                }
+            }
+            if (!forward_dead_end)
+            {
+                move_forward();
+                found_valid_path = true;
+            }
+        }
+
+        // Check left path
+        if (!found_valid_path && ultrasonic_sensors[1])
+        {
+            bool left_dead_end = false;
+            for (int i = 0; i < existing_point->numberOfPaths; i++)
+            {
+                if (existing_point->paths[i].direction == get_orientation_on_the_left(current_car.current_orientation))
+                {
+                    left_dead_end = existing_point->paths[i].dead_end;
+                    break;
+                }
+            }
+            if (!left_dead_end)
+            {
+                turn_left();
+                move_forward();
+                found_valid_path = true;
+            }
+        }
+
+        // Check right path
+        if (!found_valid_path && ultrasonic_sensors[2])
+        {
+            bool right_dead_end = false;
+            for (int i = 0; i < existing_point->numberOfPaths; i++)
+            {
+                if (existing_point->paths[i].direction == get_orientation_on_the_right(current_car.current_orientation))
+                {
+                    right_dead_end = existing_point->paths[i].dead_end;
+                    break;
+                }
+            }
+            if (!right_dead_end)
+            {
+                turn_right();
+                move_forward();
+                found_valid_path = true;
+            }
+        }
+
+        // If no valid paths found, turn around
+        if (!found_valid_path)
+        {
+            turn_opposite_direction();
+            move_forward();
+        }
     }
     else
     {

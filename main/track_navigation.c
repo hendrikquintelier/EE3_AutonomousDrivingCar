@@ -54,7 +54,7 @@ void turn_opposite_direction()
 {
     Direction new_dir = (current_car.current_orientation + 2) % 4;
     motor_turn(new_dir);
-    current_car.current_orientation = new_dir;
+    log_remote("[TURN] Turned to opposite direction: %s\n", direction_to_string(new_dir));
 }
 
 /**
@@ -67,7 +67,6 @@ void turn_left()
 {
     Direction new_dir = (current_car.current_orientation + 3) % 4;
     motor_turn(new_dir);
-    current_car.current_orientation = new_dir;
 }
 
 /**
@@ -80,5 +79,4 @@ void turn_right()
 {
     Direction new_dir = (current_car.current_orientation + 1) % 4;
     motor_turn(new_dir);
-    current_car.current_orientation = new_dir;
 }

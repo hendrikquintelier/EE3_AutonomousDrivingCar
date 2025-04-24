@@ -63,4 +63,6 @@ void start_exploration(void);
  */
 Path *find_shortest_path_to_mappoint_tbd(MapPoint *current_point);
 
+int is_map_point();
+
 #endif /* MAIN_EXPLORATION_H */

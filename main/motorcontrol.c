@@ -14,6 +14,7 @@
 #include "esp_mac.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "globals.h"
 
 #define BLOCK_SIZE 40.0f
 
@@ -389,11 +390,12 @@ drive_result_t motor_forward()
     ultrasonic_readings_t u = ultrasonic_get_all();
     float front = (u.front < 1.0f || u.front > 400.0f) ? 0.0f : u.front;
 
+    const float MAX_DISTANCE_OFFSET = 10.0f;
     float raw_off = fmodf(front, BLOCK_SIZE) - 10.0f; /* −10 … +30 cm      */
-    if (raw_off > 8.0f)
-        raw_off = 8.0f;
-    if (raw_off < -8.0f)
-        raw_off = -8.0f;
+    if (raw_off > MAX_DISTANCE_OFFSET)
+        raw_off = MAX_DISTANCE_OFFSET;
+    if (raw_off < -MAX_DISTANCE_OFFSET)
+        raw_off = -MAX_DISTANCE_OFFSET;
 
     float target_dist = BLOCK_SIZE + raw_off - dist_comp;
 
@@ -601,6 +603,7 @@ void motor_turn(Direction target)
     /* ----------------------------------------------------------------- */
 
     current_direction = target;
+    current_car.current_orientation = target;
     float desired_heading = normalize_angle((float)target * 90.0f + heading_offset);
     printf("[TURN_DEBUG] Desired heading: %.1f°\n", desired_heading);
 

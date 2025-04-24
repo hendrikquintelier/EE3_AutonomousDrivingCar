@@ -10,6 +10,7 @@
 #include "FundamentalPath.h"
 #include "../direction.h"
 #include "../wifi_logger.h"
+#include "../main_exploration.h"
 
 // ======================= GLOBAL VARIABLES ======================= //
 
@@ -196,6 +197,13 @@ void print_map_point(const MapPoint *mp)
  */
 MapPoint *check_map_point_already_exists()
 {
+    // First check if we're at a MapPoint
+    if (!is_map_point())
+    {
+        return NULL;
+    }
+
+    // Then check if a MapPoint already exists at this location
     for (int i = 0; i < num_map_points_all; i++)
     {
         if (map_points_all[i]->location.x == current_car.current_location.x &&

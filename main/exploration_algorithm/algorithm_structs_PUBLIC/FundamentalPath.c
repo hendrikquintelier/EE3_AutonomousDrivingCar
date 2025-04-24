@@ -80,6 +80,7 @@ void initialize_fundamental_path(FundamentalPath *fp, MapPoint *start, int dista
     fp->end = NULL;
     fp->distance = distance;
     fp->direction = NORTH; // Default direction (updated later)
+    fp->dead_end = false;  // Initialize dead_end flag to false
 
     add_fundamental_path(fp);
 }

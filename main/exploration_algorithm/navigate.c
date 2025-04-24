@@ -13,12 +13,22 @@
  */
 void turn_to_undiscovered_fundamental_path(MapPoint *mp)
 {
+    log_remote("[NAVIGATE] Attempting to turn to undiscovered path at MapPoint (%d, %d)\n",
+               mp->location.x, mp->location.y);
+
     for (int i = 0; i < mp->numberOfPaths; i++)
     {
+        log_remote("[NAVIGATE] Checking path %d: Direction %s, End: %s\n",
+                   i + 1,
+                   direction_to_string(mp->paths[i].direction),
+                   mp->paths[i].end ? "Known" : "Unknown");
+
         // Check for an unexplored path
         if (mp->paths[i].end == NULL)
         {
-            current_car.current_orientation = mp->paths[i].direction;
+            log_remote("[NAVIGATE] Found unexplored path in direction %s, initiating turn\n",
+                       direction_to_string(mp->paths[i].direction));
+            motor_turn(mp->paths[i].direction);
             break;
         }
     }
@@ -41,34 +51,52 @@ void rotate_to(Direction target_direction)
  */
 void navigate_path(const Path *p)
 {
+    printf("[NAVIGATE] Starting path navigation\n");
+
     // Validate the path before proceeding
     if (!p || !p->route || p->totalDistance == 0)
     {
+        printf("[NAVIGATE] ERROR: Invalid path provided\n");
         return;
     }
+
+    printf("[NAVIGATE] Path details - Total distance: %d, Start: (%d, %d), End: (%d, %d)\n",
+           p->totalDistance,
+           p->start->location.x, p->start->location.y,
+           p->end->location.x, p->end->location.y);
 
     // Iterate through each step in the path
     for (int i = 0; i < p->totalDistance; i++)
     {
         FundamentalPath *step = p->route[i];
+        printf("[NAVIGATE] Processing step %d/%d\n", i + 1, p->totalDistance);
 
         // Stop if the car has reached the final destination
         if (current_car.current_location.x == p->end->location.x &&
             current_car.current_location.y == p->end->location.y)
         {
+            printf("[NAVIGATE] Reached final destination at (%d, %d)\n",
+                   p->end->location.x, p->end->location.y);
             break;
         }
 
         // Validate the step before proceeding
         if (!step || !step->end)
         {
+            printf("[NAVIGATE] ERROR: Invalid step %d in path\n", i + 1);
             return;
         }
 
+        printf("[NAVIGATE] Current location: (%d, %d), Next step: Direction %s, Distance: %d\n",
+               current_car.current_location.x, current_car.current_location.y,
+               direction_to_string(step->direction), step->distance);
+
         // Rotate the car to align with the required direction
-        rotate_to(step->direction);
+        printf("[NAVIGATE] Rotating to direction %s\n", direction_to_string(step->direction));
+        motor_turn(step->direction);
 
         // Move forward along the path
+        printf("[NAVIGATE] Moving forward %d units\n", step->distance);
         for (int j = 0; j < step->distance; j++)
         {
             move_forward();
@@ -76,8 +104,11 @@ void navigate_path(const Path *p)
 
         // Update the car's position after completing the movement
         current_car.current_location = step->end->location;
+        printf("[NAVIGATE] Moved to new location: (%d, %d)\n",
+               current_car.current_location.x, current_car.current_location.y);
     }
 
     // Adjust the car's orientation after reaching the final destination
+    printf("[NAVIGATE] Path navigation complete, turning to undiscovered path\n");
     turn_to_undiscovered_fundamental_path(p->end);
 }

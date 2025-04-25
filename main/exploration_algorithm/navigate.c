@@ -30,19 +30,10 @@ void turn_to_undiscovered_fundamental_path(MapPoint *mp)
             log_remote("[NAVIGATE] Found unexplored path in direction %s, initiating turn\n",
                        direction_to_string(mp->paths[i].direction));
             motor_turn(mp->paths[i].direction);
+            former_map_point = mp;
             break;
         }
     }
-}
-
-/**
- * @brief Rotates the car to face the specified direction.
- *
- * @param target_direction The desired orientation of the car.
- */
-void rotate_to(Direction target_direction)
-{
-    current_car.current_orientation = target_direction;
 }
 
 /**
@@ -52,7 +43,9 @@ void rotate_to(Direction target_direction)
  */
 void navigate_path(const Path *p)
 {
-    log_remote("[NAVIGATE] Starting path navigation\n");
+    log_remote("[NAVIGATE] Starting path navigation from (%d, %d) to (%d, %d)\n",
+               current_car.current_location.x, current_car.current_location.y,
+               p->end->location.x, p->end->location.y);
 
     // Validate the path before proceeding
     if (!p || !p->route || p->totalDistance == 0)
@@ -70,7 +63,8 @@ void navigate_path(const Path *p)
     for (int i = 0; i < p->totalDistance; i++)
     {
         FundamentalPath *step = p->route[i];
-        log_remote("[NAVIGATE] Processing step %d/%d\n", i + 1, p->totalDistance);
+        log_remote("[NAVIGATE] Processing step %d/%d - Current location before step: (%d, %d)\n",
+                   i + 1, p->totalDistance, current_car.current_location.x, current_car.current_location.y);
 
         // Stop if the car has reached the final destination
         if (current_car.current_location.x == p->end->location.x &&
@@ -82,18 +76,21 @@ void navigate_path(const Path *p)
         }
 
         // Validate the step before proceeding
-        if (!step || !step->end)
+        if (!step)
         {
             log_remote("[NAVIGATE] ERROR: Invalid step %d in path\n", i + 1);
             return;
         }
 
-        log_remote("[NAVIGATE] Current location: (%d, %d), Next step: Direction %s, Distance: %d\n",
-                   current_car.current_location.x, current_car.current_location.y,
+        log_remote("[NAVIGATE] Step details - From: (%d, %d), To: (%d, %d), Direction: %s, Distance: %d\n",
+                   step->start->location.x, step->start->location.y,
+                   step->end->location.x, step->end->location.y,
                    direction_to_string(step->direction), step->distance);
 
         // Rotate the car to align with the required direction
-        log_remote("[NAVIGATE] Rotating to direction %s\n", direction_to_string(step->direction));
+        log_remote("[NAVIGATE] Rotating from %s to %s\n",
+                   direction_to_string(current_car.current_orientation),
+                   direction_to_string(step->direction));
         motor_turn(step->direction);
 
         // Move forward along the path
@@ -101,15 +98,21 @@ void navigate_path(const Path *p)
         for (int j = 0; j < step->distance; j++)
         {
             move_forward();
+            log_remote("[NAVIGATE] Step %d/%d - Unit %d/%d - Current location: (%d, %d)\n",
+                       i + 1, p->totalDistance, j + 1, step->distance,
+                       current_car.current_location.x, current_car.current_location.y);
         }
 
         // Update the car's position after completing the movement
+        Location prev_location = current_car.current_location;
         current_car.current_location = step->end->location;
-        log_remote("[NAVIGATE] Moved to new location: (%d, %d)\n",
+        log_remote("[NAVIGATE] Step complete - Location updated from (%d, %d) to (%d, %d)\n",
+                   prev_location.x, prev_location.y,
                    current_car.current_location.x, current_car.current_location.y);
     }
 
     // Adjust the car's orientation after reaching the final destination
-    log_remote("[NAVIGATE] Path navigation complete, turning to undiscovered path\n");
+    log_remote("[NAVIGATE] Path navigation complete at location (%d, %d)\n",
+               current_car.current_location.x, current_car.current_location.y);
     turn_to_undiscovered_fundamental_path(p->end);
 }

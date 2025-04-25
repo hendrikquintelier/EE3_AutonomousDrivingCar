@@ -47,9 +47,9 @@ void decide_next_move()
     update_ultrasonic_readings();
 
     // Log ultrasonic values for debugging
-    printf("[ULTRASONIC] Front: %.1f cm (Path: %s)\n", front_distance_ultrasonic, ultrasonic_sensors[0] ? "CLEAR" : "BLOCKED");
-    printf("[ULTRASONIC] Left:  %.1f cm (Path: %s)\n", left_distance_ultrasonic, ultrasonic_sensors[1] ? "CLEAR" : "BLOCKED");
-    printf("[ULTRASONIC] Right: %.1f cm (Path: %s)\n", right_distance_ultrasonic, ultrasonic_sensors[2] ? "CLEAR" : "BLOCKED");
+    log_remote("[ULTRASONIC] Front: %.1f cm (Path: %s)\n", front_distance_ultrasonic, ultrasonic_sensors[0] ? "CLEAR" : "BLOCKED");
+    log_remote("[ULTRASONIC] Left:  %.1f cm (Path: %s)\n", left_distance_ultrasonic, ultrasonic_sensors[1] ? "CLEAR" : "BLOCKED");
+    log_remote("[ULTRASONIC] Right: %.1f cm (Path: %s)\n", right_distance_ultrasonic, ultrasonic_sensors[2] ? "CLEAR" : "BLOCKED");
 
     if (ultrasonic_sensors[0])
     {
@@ -74,6 +74,22 @@ void decide_next_move()
     else
     {
         printf("[DECISION] All paths blocked - turning opposite direction\n");
+
+        // Mark the current path as a dead end if we have a former map point
+        if (former_map_point)
+        {
+            // Find the path that led us here
+            Direction current_direction = current_car.current_orientation;
+            for (int i = 0; i < former_map_point->numberOfPaths; i++)
+            {
+                if (former_map_point->paths[i].direction == current_direction)
+                {
+                    add_dead_end_flag_to_fundamental_path(&former_map_point->paths[i]);
+                    break;
+                }
+            }
+        }
+
         turn_opposite_direction();
         move_forward();
     }
@@ -134,31 +150,6 @@ void existing_map_point_algorithm(MapPoint *existing_point)
     {
         log_remote("[NAVIGATE] At start point in wrong direction, turning to correct orientation\n");
         turn_opposite_direction();
-        move_forward(); // Add forward movement after the turn
-        return;
-    }
-
-    // Check for dead ends
-    if (!ultrasonic_sensors[0] && !ultrasonic_sensors[1] && !ultrasonic_sensors[2])
-    {
-        // Mark the path we came from as a dead end
-        if (former_map_point)
-        {
-            for (int i = 0; i < former_map_point->numberOfPaths; i++)
-            {
-                if (former_map_point->paths[i].end == existing_point)
-                {
-                    former_map_point->paths[i].dead_end = true;
-                    log_remote("[NAVIGATE] Marked path from (%d,%d) to (%d,%d) as dead end\n",
-                               former_map_point->location.x, former_map_point->location.y,
-                               existing_point->location.x, existing_point->location.y);
-                    break;
-                }
-            }
-        }
-        // Turn around and go back
-        turn_opposite_direction();
-        move_forward();
         return;
     }
 
@@ -176,75 +167,7 @@ void existing_map_point_algorithm(MapPoint *existing_point)
 
     if (unexplored_paths > 0)
     {
-        // Try to find a non-dead-end path
-        bool found_valid_path = false;
-
-        // Check forward path
-        if (ultrasonic_sensors[0])
-        {
-            bool forward_dead_end = false;
-            for (int i = 0; i < existing_point->numberOfPaths; i++)
-            {
-                if (existing_point->paths[i].direction == current_car.current_orientation)
-                {
-                    forward_dead_end = existing_point->paths[i].dead_end;
-                    break;
-                }
-            }
-            if (!forward_dead_end)
-            {
-                move_forward();
-                found_valid_path = true;
-            }
         }
-
-        // Check left path
-        if (!found_valid_path && ultrasonic_sensors[1])
-        {
-            bool left_dead_end = false;
-            for (int i = 0; i < existing_point->numberOfPaths; i++)
-            {
-                if (existing_point->paths[i].direction == get_orientation_on_the_left(current_car.current_orientation))
-                {
-                    left_dead_end = existing_point->paths[i].dead_end;
-                    break;
-                }
-            }
-            if (!left_dead_end)
-            {
-                turn_left();
-                move_forward();
-                found_valid_path = true;
-            }
-        }
-
-        // Check right path
-        if (!found_valid_path && ultrasonic_sensors[2])
-        {
-            bool right_dead_end = false;
-            for (int i = 0; i < existing_point->numberOfPaths; i++)
-            {
-                if (existing_point->paths[i].direction == get_orientation_on_the_right(current_car.current_orientation))
-                {
-                    right_dead_end = existing_point->paths[i].dead_end;
-                    break;
-                }
-            }
-            if (!right_dead_end)
-            {
-                turn_right();
-                move_forward();
-                found_valid_path = true;
-            }
-        }
-
-        // If no valid paths found, turn around
-        if (!found_valid_path)
-        {
-            turn_opposite_direction();
-            move_forward();
-        }
-    }
     else
     {
         // Find shortest path to the next unexplored MapPoint
@@ -259,6 +182,7 @@ void existing_map_point_algorithm(MapPoint *existing_point)
             free(resulting_path);
         }
     }
+    former_map_point = existing_point;
 }
 
 void start_exploration()
@@ -282,7 +206,6 @@ void start_exploration()
             if (existing_point)
             {
                 log_remote("Existing MapPoint found:\n");
-                log_all_map_points();
                 existing_map_point_algorithm(existing_point);
             }
             else
@@ -300,7 +223,6 @@ void start_exploration()
                 // Initialize new MapPoint with sensor data
                 initialize_map_point(new_map_point, location, ultrasonic_sensors);
                 log_remote("New MapPoint created:\n");
-                log_all_map_points();
 
                 // Link with the previous MapPoint if it exists
                 if (former_map_point)
@@ -311,6 +233,7 @@ void start_exploration()
                 // Update the former MapPoint tracker
                 former_map_point = new_map_point;
             }
+            log_all_map_points();
         }
         // Decide the next movement
         decide_next_move();

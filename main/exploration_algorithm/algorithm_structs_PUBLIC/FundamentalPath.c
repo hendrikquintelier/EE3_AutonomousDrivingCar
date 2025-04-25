@@ -8,6 +8,7 @@
 #include "MapPoint.h"
 #include "../direction.h"
 #include "../globals.h"
+#include "../wifi_logger.h"
 
 // ======================= GLOBAL VARIABLES ======================= //
 
@@ -66,8 +67,9 @@ int determine_distance_fundamentalpath(FundamentalPath *path)
  * @param fp Pointer to the FundamentalPath structure to initialize.
  * @param start Pointer to the starting MapPoint.
  * @param distance Distance value for the path.
+ * @param direction Direction of the path.
  */
-void initialize_fundamental_path(FundamentalPath *fp, MapPoint *start, int distance)
+void initialize_fundamental_path(FundamentalPath *fp, MapPoint *start, int distance, Direction direction)
 {
     if (!fp)
     {
@@ -75,51 +77,21 @@ void initialize_fundamental_path(FundamentalPath *fp, MapPoint *start, int dista
         return;
     }
 
+    // Validate direction
+    if (direction == DEFAULT_DIRECTION || direction < NORTH || direction > WEST)
+    {
+        log_remote("Error: Invalid direction passed to initialize_fundamental_path\n");
+        return;
+    }
+
     fp->id = fundamental_path_counter++;
     fp->start = start;
     fp->end = NULL;
     fp->distance = distance;
-    fp->direction = NORTH; // Default direction (updated later)
-    fp->dead_end = false;  // Initialize dead_end flag to false
+    fp->direction = direction;
+    fp->dead_end = false; // Initialize dead_end flag to false
 
     add_fundamental_path(fp);
-}
-
-/**
- * @brief Initializes multiple FundamentalPaths based on UltraSonicDetection.
- *
- * @param UltraSonicDetection Boolean array representing detected paths.
- * @return FundamentalPath* Pointer to dynamically allocated paths array.
- */
-FundamentalPath *initialize_fundamental_paths(bool UltraSonicDetection[3])
-{
-    int pathCount = 0;
-
-    // Count the number of detected paths
-    for (int i = 0; i < 3; ++i)
-    {
-        if (UltraSonicDetection[i])
-            pathCount++;
-    }
-
-    // Allocate memory for the paths
-    FundamentalPath *paths = malloc(pathCount * sizeof(FundamentalPath));
-    if (!paths)
-    {
-        perror("Error: Failed to allocate memory for FundamentalPaths");
-        exit(EXIT_FAILURE);
-    }
-
-    int pathIndex = 0;
-    for (int i = 0; i < 3; ++i)
-    {
-        if (UltraSonicDetection[i])
-        {
-            initialize_fundamental_path(&paths[pathIndex++], NULL, 0);
-        }
-    }
-
-    return paths;
 }
 
 /**
@@ -136,43 +108,55 @@ void update_latest_fundamental_path(MapPoint *current, MapPoint *former)
         return;
     }
 
+    log_remote("[PATH] Updating paths between MapPoint %d (%d,%d) and MapPoint %d (%d,%d)\n",
+               former->id, former->location.x, former->location.y,
+               current->id, current->location.x, current->location.y);
+
     // Determine directions between the two MapPoints
     Direction fc_direction = determine_direction(former, current);
     Direction cf_direction = get_opposite_direction(fc_direction);
 
-    FundamentalPath *fc_pointer_fundamental_path = NULL;
-    FundamentalPath *cf_pointer_fundamental_path = NULL;
+    // Validate both directions
+    if (fc_direction == DEFAULT_DIRECTION || fc_direction < NORTH || fc_direction > WEST ||
+        cf_direction == DEFAULT_DIRECTION || cf_direction < NORTH || cf_direction > WEST)
+    {
+        log_remote("[PATH] Error: Invalid directions calculated between MapPoints\n");
+        return;
+    }
+
+    log_remote("[PATH] Directions: former->current: %s, current->former: %s\n",
+               direction_to_string(fc_direction), direction_to_string(cf_direction));
 
     // === Check if a path already exists from 'former' to 'current' === //
+    log_remote("[PATH] Checking former->current paths (total: %d)\n", former->numberOfPaths);
+    bool found_fc_path = false;
     for (int i = 0; i < former->numberOfPaths; ++i)
     {
+        log_remote("[PATH]   Path %d: Direction %s\n", i + 1, direction_to_string(former->paths[i].direction));
         if (former->paths[i].direction == fc_direction)
         {
-            fc_pointer_fundamental_path = &former->paths[i];
+            log_remote("[PATH]   Found existing path in direction %s\n", direction_to_string(fc_direction));
+            former->paths[i].end = current;
+            former->paths[i].distance = determine_distance_fundamentalpath(&former->paths[i]);
+            found_fc_path = true;
             break;
         }
     }
 
-    // If path exists, update its endpoint and distance
-    if (fc_pointer_fundamental_path)
+    if (!found_fc_path)
     {
-        fc_pointer_fundamental_path->end = current;
-        fc_pointer_fundamental_path->distance = determine_distance_fundamentalpath(fc_pointer_fundamental_path);
-    }
-    else
-    {
-        // Otherwise, create a new path
-        fc_pointer_fundamental_path = malloc(sizeof(FundamentalPath));
-        if (!fc_pointer_fundamental_path)
+        log_remote("[PATH] No existing path found in direction %s, creating new one\n", direction_to_string(fc_direction));
+        // Create a new path
+        FundamentalPath *newPath = malloc(sizeof(FundamentalPath));
+        if (!newPath)
         {
             perror("Error: Failed to allocate memory for FundamentalPath");
             exit(EXIT_FAILURE);
         }
 
-        initialize_fundamental_path(fc_pointer_fundamental_path, former, 0);
-        fc_pointer_fundamental_path->end = current;
-        fc_pointer_fundamental_path->direction = fc_direction;
-        fc_pointer_fundamental_path->distance = determine_distance_fundamentalpath(fc_pointer_fundamental_path);
+        initialize_fundamental_path(newPath, former, 0, fc_direction);
+        newPath->end = current;
+        newPath->distance = determine_distance_fundamentalpath(newPath);
 
         // Safely expand the former->paths array
         FundamentalPath *newPaths = realloc(former->paths, (former->numberOfPaths + 1) * sizeof(FundamentalPath));
@@ -182,38 +166,40 @@ void update_latest_fundamental_path(MapPoint *current, MapPoint *former)
             exit(EXIT_FAILURE);
         }
         former->paths = newPaths;
+        former->paths[former->numberOfPaths++] = *newPath;
+        free(newPath);
     }
 
     // === Check if a path already exists from 'current' to 'former' === //
+    log_remote("[PATH] Checking current->former paths (total: %d)\n", current->numberOfPaths);
+    bool found_cf_path = false;
     for (int i = 0; i < current->numberOfPaths; ++i)
     {
+        log_remote("[PATH]   Path %d: Direction %s\n", i + 1, direction_to_string(current->paths[i].direction));
         if (current->paths[i].direction == cf_direction)
         {
-            cf_pointer_fundamental_path = &current->paths[i];
+            log_remote("[PATH]   Found existing path in direction %s\n", direction_to_string(cf_direction));
+            current->paths[i].end = former;
+            current->paths[i].distance = determine_distance_fundamentalpath(&current->paths[i]);
+            found_cf_path = true;
             break;
         }
     }
 
-    // If path exists, update its endpoint and distance
-    if (cf_pointer_fundamental_path)
+    if (!found_cf_path)
     {
-        cf_pointer_fundamental_path->end = former;
-        cf_pointer_fundamental_path->distance = fc_pointer_fundamental_path->distance;
-    }
-    else
-    {
-        // Otherwise, create a new path
-        cf_pointer_fundamental_path = malloc(sizeof(FundamentalPath));
-        if (!cf_pointer_fundamental_path)
+        log_remote("[PATH] No existing path found in direction %s, creating new one\n", direction_to_string(cf_direction));
+        // Create a new path
+        FundamentalPath *newPath = malloc(sizeof(FundamentalPath));
+        if (!newPath)
         {
             perror("Error: Failed to allocate memory for FundamentalPath");
             exit(EXIT_FAILURE);
         }
 
-        initialize_fundamental_path(cf_pointer_fundamental_path, current, 0);
-        cf_pointer_fundamental_path->end = former;
-        cf_pointer_fundamental_path->direction = cf_direction;
-        cf_pointer_fundamental_path->distance = fc_pointer_fundamental_path->distance;
+        initialize_fundamental_path(newPath, current, 0, cf_direction);
+        newPath->end = former;
+        newPath->distance = determine_distance_fundamentalpath(newPath);
 
         // Safely expand the current->paths array
         FundamentalPath *newPaths = realloc(current->paths, (current->numberOfPaths + 1) * sizeof(FundamentalPath));
@@ -223,5 +209,35 @@ void update_latest_fundamental_path(MapPoint *current, MapPoint *former)
             exit(EXIT_FAILURE);
         }
         current->paths = newPaths;
+        current->paths[current->numberOfPaths++] = *newPath;
+        free(newPath);
     }
+
+    // Log the bidirectional connection
+    log_remote("[PATH] Created/Updated bidirectional connection:\n");
+    log_remote("  MapPoint %d (%d,%d) -> MapPoint %d (%d,%d) in direction %s\n",
+               former->id, former->location.x, former->location.y,
+               current->id, current->location.x, current->location.y,
+               direction_to_string(fc_direction));
+    log_remote("  MapPoint %d (%d,%d) -> MapPoint %d (%d,%d) in direction %s\n",
+               current->id, current->location.x, current->location.y,
+               former->id, former->location.x, former->location.y,
+               direction_to_string(cf_direction));
+}
+
+/**
+ * @brief Marks a fundamental path as a dead end.
+ *
+ * @param path Pointer to the FundamentalPath to mark as a dead end.
+ */
+void add_dead_end_flag_to_fundamental_path(FundamentalPath *path)
+{
+    if (!path)
+    {
+        fprintf(stderr, "Error: Null pointer passed to add_dead_end_flag_to_fundamental_path\n");
+        return;
+    }
+
+    path->dead_end = true;
+    log_remote("[DEAD END] Marked path %d as a dead end\n", path->id);
 }

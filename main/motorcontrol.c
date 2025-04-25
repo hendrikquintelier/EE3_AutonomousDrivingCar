@@ -391,7 +391,7 @@ drive_result_t motor_forward()
     float front = (u.front < 1.0f || u.front > 400.0f) ? 0.0f : u.front;
 
     const float MAX_DISTANCE_OFFSET = 10.0f;
-    float raw_off = fmodf(front, BLOCK_SIZE) - 10.0f; /* −10 … +30 cm      */
+    float raw_off = fmodf(front, BLOCK_SIZE) - 13.0f; /* −10 … +30 cm      */
     if (raw_off > MAX_DISTANCE_OFFSET)
         raw_off = MAX_DISTANCE_OFFSET;
     if (raw_off < -MAX_DISTANCE_OFFSET)

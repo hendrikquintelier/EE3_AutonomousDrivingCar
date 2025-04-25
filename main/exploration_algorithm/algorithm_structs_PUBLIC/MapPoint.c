@@ -41,15 +41,42 @@ void initialize_map_point(MapPoint *mp, Location location, bool UltraSonicDetect
     mp->location = location;
     log_remote("Initializing MapPoint %d at location (%d, %d)\n", mp->id, location.x, location.y);
 
-    // Count the number of detected paths
+    // Count the number of detected paths with valid directions
     int pathCount = 0;
+    Direction directions[3];
+    bool validPaths[3] = {false, false, false};
+
+    // First determine all directions
     for (int i = 0; i < 3; ++i)
     {
         if (UltraSonicDetection[i])
-            pathCount++;
+        {
+            Direction dir;
+            switch (i)
+            {
+            case 0:
+                dir = (Direction)current_car.current_orientation;
+                break;
+            case 1:
+                dir = get_orientation_on_the_left(current_car.current_orientation);
+                break;
+            case 2:
+                dir = get_orientation_on_the_right(current_car.current_orientation);
+                break;
+            }
+
+            // Only count paths with valid directions
+            if (dir != DEFAULT_DIRECTION && dir >= NORTH && dir <= WEST)
+            {
+                directions[i] = dir;
+                validPaths[i] = true;
+                pathCount++;
+            }
+        }
     }
+
     mp->numberOfPaths = pathCount;
-    log_remote("Number of paths detected: %d\n", pathCount);
+    log_remote("Number of valid paths detected: %d\n", pathCount);
 
     // Allocate memory for paths
     mp->paths = malloc(pathCount * sizeof(FundamentalPath));
@@ -59,31 +86,14 @@ void initialize_map_point(MapPoint *mp, Location location, bool UltraSonicDetect
         exit(EXIT_FAILURE);
     }
 
-    // Initialize detected paths and assign corresponding directions
+    // Initialize only the valid paths
     int pathIndex = 0;
     for (int i = 0; i < 3; ++i)
     {
-        if (UltraSonicDetection[i])
+        if (validPaths[i])
         {
-            initialize_fundamental_path(&mp->paths[pathIndex], mp, 0);
-
-            // Assign direction based on sensor index
-            switch (i)
-            {
-            case 0:
-                mp->paths[pathIndex].direction = (Direction)current_car.current_orientation;
-                log_remote("Path %d: Forward direction %s\n", pathIndex + 1, direction_to_string(mp->paths[pathIndex].direction));
-                break; // Forward
-            case 1:
-                mp->paths[pathIndex].direction = get_orientation_on_the_left(current_car.current_orientation);
-                log_remote("Path %d: Left direction %s\n", pathIndex + 1, direction_to_string(mp->paths[pathIndex].direction));
-                break; // Left
-            case 2:
-                mp->paths[pathIndex].direction = get_orientation_on_the_right(current_car.current_orientation);
-                log_remote("Path %d: Right direction %s\n", pathIndex + 1, direction_to_string(mp->paths[pathIndex].direction));
-                break; // Right
-            }
-
+            initialize_fundamental_path(&mp->paths[pathIndex], mp, 0, directions[i]);
+            log_remote("Path %d: Direction %s\n", pathIndex + 1, direction_to_string(directions[i]));
             pathIndex++;
         }
     }
@@ -106,7 +116,6 @@ void initialize_map_point(MapPoint *mp, Location location, bool UltraSonicDetect
     if (mp_has_unexplored_paths(mp))
     {
         add_map_point_tbd(mp);
-        log_remote("MapPoint %d added to To Be Discovered list\n", mp->id);
     }
 }
 
@@ -132,8 +141,7 @@ void add_map_point_tbd(MapPoint *mp)
     if (mp->id != 0)
     {
         map_points_tbd[num_map_points_tbd++] = mp;
-        log_all_map_points(); // Log after adding to TBD list
-    }
+        }
 }
 
 /**
@@ -264,13 +272,10 @@ void update_existing_mappoint(MapPoint *existing_point)
     {
         // Allocate new paths dynamically
         existing_point->paths = realloc(existing_point->paths, (existing_point->numberOfPaths + 1) * sizeof(FundamentalPath));
-        initialize_fundamental_path(&existing_point->paths[existing_point->numberOfPaths], existing_point, distance);
+        initialize_fundamental_path(&existing_point->paths[existing_point->numberOfPaths], existing_point, distance, existing_to_latest);
         existing_point->paths[existing_point->numberOfPaths].end = latest_point;
-        existing_point->paths[existing_point->numberOfPaths].direction = existing_to_latest;
         existing_point->numberOfPaths++;
     }
-
-    log_all_map_points(); // Log after updating existing map point
 }
 
 /**
@@ -285,14 +290,14 @@ void log_all_map_points()
     for (int i = 0; i < num_map_points_all; i++)
     {
         MapPoint *mp = map_points_all[i];
-        log_remote("\nMap Point %d at (%d, %d):\n",
-                   mp->id, mp->location.x, mp->location.y);
+        log_remote("\nMap Point %d at (%d, %d) (Total paths: %d):\n",
+                   mp->id, mp->location.x, mp->location.y, mp->numberOfPaths);
 
         for (int j = 0; j < mp->numberOfPaths; j++)
         {
             FundamentalPath *path = &mp->paths[j];
-            log_remote("  Path %d: Direction %s, ",
-                       j + 1, direction_to_string(path->direction));
+            log_remote("  Path %d/%d: Direction %s, ",
+                       j + 1, mp->numberOfPaths, direction_to_string(path->direction));
 
             if (path->end)
             {

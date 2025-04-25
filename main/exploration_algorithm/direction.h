@@ -7,6 +7,7 @@ typedef struct MapPoint MapPoint;
 
 typedef enum
 {
+    DEFAULT_DIRECTION = -1,
     NORTH = 0,             // 0°
     EAST = 1,              // 90°
     SOUTH = 2,             // 180°

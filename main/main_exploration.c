@@ -40,95 +40,6 @@ int is_map_point()
 }
 
 /**
- * @brief Decides the next move based on ultrasonic sensor readings.
- */
-void decide_next_move()
-{
-    update_ultrasonic_readings();
-
-    // Log ultrasonic values for debugging
-    log_remote("[ULTRASONIC] Front: %.1f cm (Path: %s)\n", front_distance_ultrasonic, ultrasonic_sensors[0] ? "CLEAR" : "BLOCKED");
-    log_remote("[ULTRASONIC] Left:  %.1f cm (Path: %s)\n", left_distance_ultrasonic, ultrasonic_sensors[1] ? "CLEAR" : "BLOCKED");
-    log_remote("[ULTRASONIC] Right: %.1f cm (Path: %s)\n", right_distance_ultrasonic, ultrasonic_sensors[2] ? "CLEAR" : "BLOCKED");
-
-    if (ultrasonic_sensors[0])
-    {
-        printf("[DECISION] Moving forward - path clear\n");
-        move_forward();
-        return;
-    }
-
-    // If forward is blocked, try turning
-    if (ultrasonic_sensors[1])
-    {
-        printf("[DECISION] Turning left - path clear\n");
-        turn_left();
-        move_forward();
-    }
-    else if (ultrasonic_sensors[2])
-    {
-        printf("[DECISION] Turning right - path clear\n");
-        turn_right();
-        move_forward();
-    }
-    else
-    {
-        printf("[DECISION] All paths blocked - turning opposite direction\n");
-
-        // Mark the current path as a dead end if we have a former map point
-        if (former_map_point)
-        {
-            // Find the path that led us here
-            Direction current_direction = current_car.current_orientation;
-            for (int i = 0; i < former_map_point->numberOfPaths; i++)
-            {
-                if (former_map_point->paths[i].direction == current_direction)
-                {
-                    add_dead_end_flag_to_fundamental_path(&former_map_point->paths[i]);
-                    break;
-                }
-            }
-        }
-
-        turn_opposite_direction();
-        move_forward();
-    }
-}
-
-/**
- * @brief Checks if the track exploration has been successfully completed.
- *
- * @return int 1 if exploration is complete, 0 otherwise.
- */
-int checkValidTrackCompletion()
-{
-    return (current_car.current_location.x == start.x &&
-            current_car.current_location.y == start.y &&
-            num_map_points_all > 1 &&
-            current_car.current_orientation != get_opposite_direction(start_orientation));
-}
-
-/**
- * @brief Selects the next unexplored MapPoint.
- *
- * @return MapPoint* Pointer to the next MapPoint to explore, or NULL if none remain.
- */
-MapPoint *select_next_mappoint()
-{
-    if (num_map_points_tbd == 0)
-        return NULL;
-
-    for (int i = 0; i < num_map_points_tbd; i++)
-    {
-        if (map_points_tbd[i] != NULL)
-        {
-            return map_points_tbd[i];
-        }
-    }
-    return NULL;
-}
-
-/**
  * @brief Handles navigation when revisiting an already discovered MapPoint.
  *
  * @param existing_point Pointer to the existing MapPoint.
@@ -167,7 +78,7 @@ void existing_map_point_algorithm(MapPoint *existing_point)
 
     if (unexplored_paths > 0)
     {
-        }
+    }
     else
     {
         // Find shortest path to the next unexplored MapPoint
@@ -183,6 +94,119 @@ void existing_map_point_algorithm(MapPoint *existing_point)
         }
     }
     former_map_point = existing_point;
+}
+
+/**
+ * @brief Decides the next move based on ultrasonic sensor readings.
+ */
+void decide_next_move()
+{
+    update_ultrasonic_readings();
+
+    // Log ultrasonic values for debugging
+    log_remote("[ULTRASONIC] Front: %.1f cm (Path: %s)\n", front_distance_ultrasonic, ultrasonic_sensors[0] ? "CLEAR" : "BLOCKED");
+    log_remote("[ULTRASONIC] Left:  %.1f cm (Path: %s)\n", left_distance_ultrasonic, ultrasonic_sensors[1] ? "CLEAR" : "BLOCKED");
+    log_remote("[ULTRASONIC] Right: %.1f cm (Path: %s)\n", right_distance_ultrasonic, ultrasonic_sensors[2] ? "CLEAR" : "BLOCKED");
+
+    if (ultrasonic_sensors[0])
+    {
+        printf("[DECISION] Moving forward - path clear\n");
+        move_forward();
+        return;
+    }
+
+    // If forward is blocked, try turning
+    if (ultrasonic_sensors[1])
+    {
+        printf("[DECISION] Turning left - path clear\n");
+        turn_left();
+        move_forward();
+    }
+    else if (ultrasonic_sensors[2])
+    {
+        printf("[DECISION] Turning right - path clear\n");
+        turn_right();
+        move_forward();
+    }
+    else
+    {
+        printf("[DECISION] All paths blocked - dead end detected\n");
+
+        // First check if a map point already exists at this location
+        MapPoint *existing_point = check_map_point_already_exists();
+        if (existing_point)
+        {
+            log_remote("Found existing MapPoint at dead end location\n");
+            existing_map_point_algorithm(existing_point);
+            return;
+        }
+        else
+        {
+            // Create a new MapPoint at the dead end
+            MapPoint *dead_end_point = malloc(sizeof(MapPoint));
+            if (!dead_end_point)
+            {
+                log_remote("Memory allocation failed for dead end MapPoint");
+                exit(EXIT_FAILURE);
+            }
+
+            // Set location based on the car's current position
+            Location location = {current_car.current_location.x, current_car.current_location.y};
+
+            // For a dead end, we only want one path - the one back to where we came from
+            bool paths[3] = {false, false, false};
+            Direction back_direction = get_opposite_direction(current_car.current_orientation);
+
+            // Initialize new MapPoint with the path back
+            initialize_map_point(dead_end_point, location, paths);
+            log_remote("Dead end MapPoint created\n");
+
+            // Link with the previous MapPoint if it exists
+            if (former_map_point)
+            {
+                update_latest_fundamental_path(dead_end_point, former_map_point);
+                former_map_point = dead_end_point;
+            }
+
+            // Update the former MapPoint tracker
+            former_map_point = dead_end_point;
+            log_all_map_points();
+            existing_map_point_algorithm(dead_end_point);
+        }
+    }
+}
+
+/**
+ * @brief Checks if the track exploration has been successfully completed.
+ *
+ * @return int 1 if exploration is complete, 0 otherwise.
+ */
+int checkValidTrackCompletion()
+{
+    return (current_car.current_location.x == start.x &&
+            current_car.current_location.y == start.y &&
+            num_map_points_all > 1 &&
+            current_car.current_orientation != get_opposite_direction(start_orientation));
+}
+
+/**
+ * @brief Selects the next unexplored MapPoint.
+ *
+ * @return MapPoint* Pointer to the next MapPoint to explore, or NULL if none remain.
+ */
+MapPoint *select_next_mappoint()
+{
+    if (num_map_points_tbd == 0)
+        return NULL;
+
+    for (int i = 0; i < num_map_points_tbd; i++)
+    {
+        if (map_points_tbd[i] != NULL)
+        {
+            return map_points_tbd[i];
+        }
+    }
+    return NULL;
 }
 
 void start_exploration()

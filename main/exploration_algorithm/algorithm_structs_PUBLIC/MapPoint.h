@@ -39,4 +39,7 @@ void update_existing_mappoint(MapPoint *existing_point);
 // Function to log all map points and their connections
 void log_all_map_points();
 
+// Function to calculate Manhattan distance between two locations
+int calculate_distance(Location a, Location b);
+
 #endif // MAPPOINT_H

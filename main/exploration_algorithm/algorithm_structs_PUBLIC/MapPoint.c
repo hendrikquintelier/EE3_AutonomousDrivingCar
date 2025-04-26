@@ -79,11 +79,22 @@ void initialize_map_point(MapPoint *mp, Location location, bool UltraSonicDetect
     log_remote("Number of valid paths detected: %d\n", pathCount);
 
     // Allocate memory for paths
-    mp->paths = malloc(pathCount * sizeof(FundamentalPath));
-    if (!mp->paths)
+    if (pathCount != 0)
     {
-        log_remote("Error: Failed to allocate memory for FundamentalPaths\n");
-        exit(EXIT_FAILURE);
+        mp->paths = malloc(pathCount * sizeof(FundamentalPath));
+        if (!mp->paths)
+        {
+            log_remote("Error: Failed to allocate memory for FundamentalPaths\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+    else
+    {
+        // add path for dead ends!
+        mp->paths = malloc(sizeof(FundamentalPath));
+        mp->paths[0].direction = get_opposite_direction(current_car.current_orientation);
+        mp->paths[0].end = former_map_point;
+        mp->paths[0].distance = calculate_distance(mp->location, former_map_point->location);
     }
 
     // Initialize only the valid paths
@@ -137,11 +148,11 @@ void add_map_point_tbd(MapPoint *mp)
         }
     }
 
-    // Avoid adding the start point (ID 0)
-    if (mp->id != 0)
+    // Only avoid adding points at the start location
+    if (mp->location.x != start.x || mp->location.y != start.y)
     {
         map_points_tbd[num_map_points_tbd++] = mp;
-        }
+    }
 }
 
 /**

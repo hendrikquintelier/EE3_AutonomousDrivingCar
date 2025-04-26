@@ -390,7 +390,7 @@ drive_result_t motor_forward()
     ultrasonic_readings_t u = ultrasonic_get_all();
     float front = (u.front < 1.0f || u.front > 400.0f) ? 0.0f : u.front;
 
-    const float MAX_DISTANCE_OFFSET = 10.0f;
+    const float MAX_DISTANCE_OFFSET = 8.0f;
     float raw_off = fmodf(front, BLOCK_SIZE) - 13.0f; /* −10 … +30 cm      */
     if (raw_off > MAX_DISTANCE_OFFSET)
         raw_off = MAX_DISTANCE_OFFSET;
@@ -479,7 +479,7 @@ drive_result_t motor_forward()
 
         /* dynamic thresholds */
         const float DECEL_START = fmaxf(0.40f * target_dist, 12.0f); /* ≥12 cm */
-        const float BRAKE_START = 1.0f;                              /* fixed */
+        const float BRAKE_START = 3.0f;                              /* fixed */
 
         /* a) ramp-up until >10 cm/s */
         if (speed < RAMP_SPEED_CMPS && duty_ratio < CRUISE_DUTY_MAX)
@@ -597,8 +597,8 @@ void motor_turn(Direction target)
     const float LEFT_FACTOR = 1.0f;
     const float RAMP_START_DUTY = 0.15f, RAMP_MAX_DUTY = 0.65f, RAMP_STEP = 0.025f;
     const float MIN_ANG_VEL_DPS = 20.0f;
-    const float COARSE_TO_PROP_DEG = 50.0f, BRAKE_ZONE_BEGIN_DEG = 15.0f;
-    const float MAX_PROP_DUTY = 0.60f, MAX_BRAKE_DUTY = 0.25f, OVERSHOOT_BRAKE_DUTY = 0.375f;
+    const float COARSE_TO_PROP_DEG = 55.0f, BRAKE_ZONE_BEGIN_DEG = 17.5f;
+    const float MAX_PROP_DUTY = 0.60f, MAX_BRAKE_DUTY = 0.25f, OVERSHOOT_BRAKE_DUTY = 0.0f;
     const unsigned STABLE_TIME_REQUIRED_MS = 300, LOOP_PERIOD_MS = 15;
     /* ----------------------------------------------------------------- */
 
@@ -697,7 +697,7 @@ void motor_turn(Direction target)
         else
         {
             float s = (BRAKE_ZONE_BEGIN_DEG - abs_err) / BRAKE_ZONE_BEGIN_DEG;
-            cmd_ratio = -MAX_BRAKE_DUTY * s * dir_sign;
+            cmd_ratio = MAX_BRAKE_DUTY * s * dir_sign;
             printf("[TURN_DEBUG] Braking: s=%.3f, cmd_ratio=%.3f\n", s, cmd_ratio);
         }
 
@@ -771,4 +771,119 @@ void test_navigation(void)
         // Move to next direction in sequence
         current_direction_index = (current_direction_index + 1) % NUM_DIRECTIONS;
     }
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ *  Speed-PID constants  (tuned conservatively – adjust in the field)
+ * ──────────────────────────────────────────────────────────────────────────*/
+#define SPEED_KP 0.005f        // proportional gain
+#define SPEED_KI 0.000f        // integral gain
+#define SPEED_KD 0.000f        // derivative gain
+#define SPEED_I_MAX 0.20f      // integral wind-up guard
+#define TARGET_SPEED_CMPS 5.0f // ← 5 cm · s-¹ set-point
+/* ------------------------------------------------------------------------ */
+
+/**
+ *  motor_forward_constant_5cmps()
+ *  ─────────────────────────────────────────────────────────────────────────
+ *  Drive straight ahead at ≈5 cm · s-¹ until the requested travel-distance
+ *  is reached (pass  -1  to keep rolling indefinitely and call motor_stop()
+ *  from elsewhere).
+ *
+ *  @param distance_cm  〚float〛  target travel distance in centimetres
+ *                       (-1 ➜ no distance limit / open-ended).
+ *  @return drive_result_t  final heading & ultrasonic snapshot (same as
+ *                          motor_forward()).
+ */
+drive_result_t motor_forward_constant_5cmps(float distance_cm)
+{
+    /* ── housekeeping ──────────────────────────────────────────────── */
+    drive_result_t result;
+    encoder_reset();
+    mpu_data_t ori = mpu_get_orientation();
+    const float base_yaw = (float)current_direction * 90.0f;
+    const float target_yaw = normalize_angle(base_yaw); // stay on axis
+
+    /* ── speed-PID state -------------------------------------------- */
+    float speed_integral = 0.0f;
+    float last_speed_err = 0.0f;
+    unsigned long last_loop_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+    /* ── heading-PID uses existing globals (yaw_integral, etc.) ¬──── */
+    last_pid_update = last_loop_ms;
+
+    /* start rolling forward */
+    set_motor_direction(true);
+
+    while (1)
+    {
+        /* ------------------------------------------------------------ *
+         *  TIMING & MEASUREMENT                                        *
+         * ------------------------------------------------------------ */
+        unsigned long now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        float dt = (now_ms - last_loop_ms) / 1000.0f;
+        if (dt < 0.001f)
+            dt = 0.001f;
+
+        float travelled = encoder_get_distance(); /* cm */
+        float speed = (travelled) / dt;           /* cm·s-¹ */
+
+        /* ------------------------------------------------------------ *
+         *  EXIT CONDITIONS                                             *
+         * ------------------------------------------------------------ */
+        if (distance_cm > 0.0f && travelled >= distance_cm)
+            break; /* reached goal */
+
+        /* ------------------------------------------------------------ *
+         *  HEADING CONTROL (reuse existing routine)                    *
+         * ------------------------------------------------------------ */
+        ori = mpu_get_orientation();
+        float yaw_err = calculate_yaw_error(target_yaw, ori.yaw);
+        float corr = calculate_heading_correction(
+            yaw_err, /* error */
+            dt);     /* dt    */
+
+        /* ------------------------------------------------------------ *
+         *  SPEED-PID                                                   *
+         * ------------------------------------------------------------ */
+        float speed_err = TARGET_SPEED_CMPS - speed;
+
+        speed_integral += speed_err * dt;
+        if (speed_integral > SPEED_I_MAX)
+            speed_integral = SPEED_I_MAX;
+        if (speed_integral < -SPEED_I_MAX)
+            speed_integral = -SPEED_I_MAX;
+
+        float speed_deriv = (speed_err - last_speed_err) / dt;
+        last_speed_err = speed_err;
+
+        float duty_cmd = SPEED_KP * speed_err + SPEED_KI * speed_integral + SPEED_KD * speed_deriv;
+
+        /* baseline duty required to overcome static friction            *
+         * ( ≈20 % from experience)                                       */
+        const float BASE_DUTY = 0.5f;
+        duty_cmd += BASE_DUTY;
+
+        /* clamp to safe range                                           */
+        if (duty_cmd > 0.75f)
+            duty_cmd = 0.75f;
+        if (duty_cmd < 0.10f)
+            duty_cmd = 0.10f;
+
+        /* ------------------------------------------------------------ *
+         *  ACTUATE MOTORS                                              *
+         * ------------------------------------------------------------ */
+        long duty_left = (long)((duty_cmd - corr) * PWM_MAX_DUTY + 0.5f);
+        long duty_right = (long)((duty_cmd + corr) * PWM_MAX_DUTY + 0.5f);
+        set_motor_speed(duty_left, duty_right);
+
+        /* next loop */
+        last_loop_ms = now_ms;
+        vTaskDelay(pdMS_TO_TICKS(25)); /* 40 Hz control loop */
+    }
+
+    /* ── stop, coast & report ──────────────────────────────────────── */
+    motor_stop();
+    wait_for_stop(250, &result, target_yaw);
+    return result;
 }

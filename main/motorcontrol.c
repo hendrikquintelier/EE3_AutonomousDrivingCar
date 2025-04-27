@@ -15,7 +15,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "globals.h"
-
+#include "barcode.h"
 #define BLOCK_SIZE 40.0f
 
 // ============================================================================
@@ -798,6 +798,7 @@ drive_result_t motor_forward_constant_5cmps(float distance_cm)
     log_remote("[CONST_SPEED] Starting constant speed drive (target: %.1f cm/s, "
                "distance: %.1f cm)",
                TARGET_SPEED_CMPS, distance_cm);
+    barcode_reset();
 
     /* --------------------------------------------------------------------- */
     /*  house-keeping                                                        */
@@ -849,6 +850,7 @@ drive_result_t motor_forward_constant_5cmps(float distance_cm)
     /* --------------------------------------------------------------------- */
     while (true)
     {
+
         /* time delta ------------------------------------------------------ */
         unsigned long now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
         float dt = (now_ms - last_ms) / 1000.0f;
@@ -865,6 +867,7 @@ drive_result_t motor_forward_constant_5cmps(float distance_cm)
         float yaw_err = calculate_yaw_error(tgt_yaw, ori.yaw);
         float yaw_corr = calculate_heading_correction(yaw_err, dt);
 
+        barcode_update(dist_cm, ori.ir_voltage);
         /* distance goal reached ? ---------------------------------------- */
         if (distance_cm > 0.0f && dist_cm >= distance_cm)
         {
@@ -916,10 +919,24 @@ drive_result_t motor_forward_constant_5cmps(float distance_cm)
     /*  stop & report                                                       */
     /* --------------------------------------------------------------------- */
     motor_stop();
+
     log_remote("[CONST_SPEED] Motors stopped, waiting for complete stop");
     wait_for_stop(250, &result, tgt_yaw);
     log_remote("[CONST_SPEED] Drive complete – final heading error %.1f°, "
                "front %.1f cm",
                result.heading, result.ultrasonic.front);
+
+    /* after motor_stop() / wait_for_stop() */
+    if (barcode_is_complete())
+    {
+        const char *bits = barcode_get_bits(); /* logs details too        */
+        log_remote("[CONST_SPEED] Scanned barcode: %s", bits);
+        bc_finish();
+    }
+    else
+    {
+        log_remote("[CONST_SPEED] No complete barcode detected");
+        bc_finish();
+    }
     return result;
 }

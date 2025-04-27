@@ -3,6 +3,7 @@
 #include "mpu.h"
 #include "driver/i2c.h"
 #include "driver/gpio.h"
+#include "driver/adc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -19,6 +20,10 @@
 #define I2C_MASTER_SDA_IO 8
 #define I2C_MASTER_FREQ_HZ 400000
 #define MPU6050_I2C_ADDR 0x68
+
+// -- Hardware mapping (change if you move to ADC1) --
+#define IR_ADC_UNIT ADC_UNIT_2
+#define IR_ADC_CHANNEL ADC2_CHANNEL_3 // GPIO 2
 
 // ============================================================================
 // MPU6050 Register Map
@@ -103,6 +108,44 @@ static esp_err_t i2c_master_init(void)
     };
     ESP_ERROR_CHECK(i2c_param_config(I2C_MASTER_NUM, &conf));
     return i2c_driver_install(I2C_MASTER_NUM, I2C_MODE_MASTER, 0, 0, 0);
+}
+
+/**
+ * @brief Initialise the IR ADC channel for full-scale (0–3.3 V) readings.
+ */
+static esp_err_t ir_adc_init(void)
+{
+#if IR_ADC_UNIT == ADC_UNIT_2
+    // ADC2 on the S3 can be used alongside Wi-Fi
+    // Attenuation DB_11 gives ~0–3.3 V range
+    esp_err_t ret = adc2_config_channel_atten(IR_ADC_CHANNEL, ADC_ATTEN_DB_11);
+
+    if (ret != ESP_OK)
+    {
+        log_remote("Failed to initialize IR ADC!\n");
+    }
+    return ret;
+#else
+    // If you ever move to ADC1 (e.g. to share ADC2 with Wi-Fi on original ESP32):
+    adc1_config_width(ADC_WIDTH_BIT_12);
+    return adc1_config_channel_atten(IR_ADC_CHANNEL, ADC_ATTEN_DB_11);
+#endif
+}
+
+/**
+ * @brief Read the IR voltage in volts.
+ */
+static float read_ir_voltage(void)
+{
+    int raw;
+    esp_err_t ret = adc2_get_raw(IR_ADC_CHANNEL, ADC_WIDTH_BIT_12, &raw);
+    if (ret != ESP_OK)
+    {
+        log_remote("Failed to read IR ADC!\n");
+        return 0.0f;
+    }
+    // Convert: raw ∈ [0..4095] → [0..3.3 V]
+    return raw * (3.3f / 4095.0f);
 }
 
 static esp_err_t mpu_write_reg(uint8_t reg_addr, uint8_t data)
@@ -249,29 +292,30 @@ static void update_orientation(void)
      *  Time‐base
      *------------------------------------------------------------------*/
     uint64_t current_time_us = esp_timer_get_time();
-    float dt = (current_time_us - mpu_state.last_update_us) / 1e6f;   /* seconds */
-    if (dt <= 0.0f || dt > 0.1f) dt = 0.01f;                          /* clamp   */
+    float dt = (current_time_us - mpu_state.last_update_us) / 1e6f; /* seconds */
+    if (dt <= 0.0f || dt > 0.1f)
+        dt = 0.01f; /* clamp   */
     mpu_state.last_update_us = current_time_us;
 
     /*--------------------------------------------------------------------
      *  Roll & Pitch from accelerometer
      *------------------------------------------------------------------*/
-    float accel_roll  = atan2f(mpu_state.accel[0], mpu_state.accel[2]) *
-                        180.0f / M_PI;
+    float accel_roll = atan2f(mpu_state.accel[0], mpu_state.accel[2]) *
+                       180.0f / M_PI;
     float accel_pitch = atan2f(-mpu_state.accel[1],
-                        sqrtf(mpu_state.accel[0]*mpu_state.accel[0] +
-                              mpu_state.accel[2]*mpu_state.accel[2])) *
+                               sqrtf(mpu_state.accel[0] * mpu_state.accel[0] +
+                                     mpu_state.accel[2] * mpu_state.accel[2])) *
                         180.0f / M_PI;
 
     /*--------------------------------------------------------------------
      *  Complementary filter
      *------------------------------------------------------------------*/
     mpu_state.angles[0] = ALPHA * (mpu_state.angles[0] +
-                          mpu_state.gyro[1] * dt) +
+                                   mpu_state.gyro[1] * dt) +
                           (1.0f - ALPHA) * accel_roll;
 
     mpu_state.angles[1] = ALPHA * (mpu_state.angles[1] +
-                          mpu_state.gyro[0] * dt) +
+                                   mpu_state.gyro[0] * dt) +
                           (1.0f - ALPHA) * accel_pitch;
 
     /*--------------------------------------------------------------------
@@ -279,10 +323,10 @@ static void update_orientation(void)
      *  MPU-6050: +Z  = CCW.  Our convention: +yaw = CW  ⇒ subtract.
      *------------------------------------------------------------------*/
     float filtered_gyro_z = (fabsf(mpu_state.gyro[2]) < GYRO_THRESHOLD)
-                            ? 0.0f
-                            : mpu_state.gyro[2];
+                                ? 0.0f
+                                : mpu_state.gyro[2];
 
-    mpu_state.angles[2] -= filtered_gyro_z * dt * GYRO_SCALE;   /* CW-positive */
+    mpu_state.angles[2] -= filtered_gyro_z * dt * GYRO_SCALE; /* CW-positive */
 
     /* Wrap to [0, 360) */
     mpu_state.angles[2] = fmodf(mpu_state.angles[2], 360.0f);
@@ -295,19 +339,24 @@ static void update_orientation(void)
     float accel_y = mpu_state.accel[1] - mpu_state.accel_bias[1]; /* g units */
 
     /* noise gate & stillness detection */
-    if (fabsf(accel_y) < 0.05f) {                   /* 0.05 g threshold */
+    if (fabsf(accel_y) < 0.05f)
+    { /* 0.05 g threshold */
         accel_y = 0.0f;
-        if (++mpu_state.still_counter > 10) {       /* >100 ms still    */
-            mpu_state.is_moving   = false;
-            mpu_state.velocity_y  = 0.0f;
+        if (++mpu_state.still_counter > 10)
+        { /* >100 ms still    */
+            mpu_state.is_moving = false;
+            mpu_state.velocity_y = 0.0f;
         }
-    } else {
+    }
+    else
+    {
         mpu_state.still_counter = 0;
-        mpu_state.is_moving     = true;
+        mpu_state.is_moving = true;
     }
 
     /* reset when movement starts */
-    if (!mpu_state.movement_started && fabsf(accel_y) > 0.1f) {
+    if (!mpu_state.movement_started && fabsf(accel_y) > 0.1f)
+    {
         mpu_state.movement_started = true;
         mpu_state.velocity_y = 0.0f;
         mpu_state.position_y = 0.0f;
@@ -317,9 +366,10 @@ static void update_orientation(void)
     accel_y *= 9.81f;
 
     /* integrate */
-    if (mpu_state.is_moving) {
+    if (mpu_state.is_moving)
+    {
         mpu_state.velocity_y += accel_y * dt;
-        mpu_state.velocity_y *= 0.85f;              /* damping */
+        mpu_state.velocity_y *= 0.85f; /* damping */
     }
     mpu_state.position_y += mpu_state.velocity_y * dt;
 }
@@ -344,6 +394,7 @@ static void mpu_task(void *pvParameters)
 int mpu_init(void)
 {
     // Create mutex
+    ir_adc_init();
     mpu_mutex = xSemaphoreCreateMutex();
     if (mpu_mutex == NULL)
     {
@@ -409,6 +460,7 @@ mpu_data_t mpu_get_orientation(void)
         data.roll = mpu_state.angles[0];
         data.pitch = mpu_state.angles[1];
         data.yaw = mpu_state.angles[2];
+        data.ir_voltage = read_ir_voltage();
         xSemaphoreGive(mpu_mutex);
     }
     else

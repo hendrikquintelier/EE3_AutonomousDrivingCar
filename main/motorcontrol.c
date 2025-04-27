@@ -791,7 +791,7 @@ void test_navigation(void)
 #define SPEED_KI 0.00015f
 #define SPEED_KD 0.00005f
 #define SPEED_I_MAX 0.30f
-#define CTRL_LOOP_MS 100 /* 10 Hz main loop                       */
+#define CTRL_LOOP_MS 20 /* 50 Hz main loop                       */
 
 drive_result_t motor_forward_constant_5cmps(float distance_cm)
 {
@@ -899,15 +899,12 @@ drive_result_t motor_forward_constant_5cmps(float distance_cm)
         long duty_right = (long)((duty_cmd + yaw_corr) * PWM_MAX_DUTY + 0.5f);
         set_motor_speed(duty_left, duty_right);
 
-        /* periodic log (100 ms) ------------------------------------------ */
-        if ((now_ms - t0_ms) % 100 == 0)
-        {
-            float t = (now_ms - t0_ms) / 1000.0f;
-            log_remote("[CONST_SPEED] t=%.2fs v=%.1fcm/s duty=%02.0f%% "
-                       "yaw=%.1f° err=%.1f° dist=%.1f/%.1fcm",
-                       t, speed_cps, duty_cmd * 100.0f,
-                       ori.yaw, yaw_err, dist_cm, distance_cm);
-        }
+        float t = (now_ms - t0_ms) / 1000.0f;
+        log_remote("[CONST_SPEED] t=%.2fs v=%.1fcm/s duty=%02.0f%% "
+                   "yaw=%.1f° err=%.1f° dist=%.1f/%.1fcm",
+                   t, speed_cps, duty_cmd * 100.0f,
+                   ori.yaw, yaw_err, dist_cm, distance_cm);
+        log_remote("[CONST_SPEED] IR voltage: %.2f V", ori.ir_voltage);
 
         /* book-keeping ---------------------------------------------------- */
         last_ms = now_ms;

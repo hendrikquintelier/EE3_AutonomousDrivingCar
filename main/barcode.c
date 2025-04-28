@@ -30,9 +30,9 @@
 
 /* --------------------------- Tunables ---------------------------------- */
 #define GREY_LENGTH_CM 10.0f  /* learn μ,σ over first 10 cm          */
-#define DEVIATION_COUNT 4     /* need 3 consecutive outliers to start*/
+#define DEVIATION_COUNT 3     /* need 3 consecutive outliers to start*/
 #define BACK_COUNT 5          /* need 2 consecutive grey samples to stop */
-#define DEVIATION_MULT 10.0f  /* |v‑μ| > 3σ                          */
+#define DEVIATION_MULT 6.0f   /* |v‑μ| > 3σ                          */
 #define MAX_CODE_SAMPLES 2000 /* plenty for 50 Hz * 40 cm @ 10 cm/s  */
 
 /* --------------------------- State machine ----------------------------- */
@@ -149,13 +149,6 @@ void barcode_update(float d_cm, float v)
     /* --------------------- 3. record waveform ------------------------- */
     case ST_RECORD:
     {
-        if (B.code_n < MAX_CODE_SAMPLES)
-        {
-            B.code_v[B.code_n] = v;
-            B.code_d[B.code_n] = d_cm;
-            B.code_n++;
-        }
-
         /* classify current sample */
         const float thr = DEVIATION_MULT * B.sigma;
         int is_grey = (fabsf(v - B.mu) <= thr);
@@ -166,6 +159,13 @@ void barcode_update(float d_cm, float v)
         else
         {
             B.back_cnt = 0;
+            /* only record non-grey samples */
+            if (B.code_n < MAX_CODE_SAMPLES)
+            {
+                B.code_v[B.code_n] = v;
+                B.code_d[B.code_n] = d_cm;
+                B.code_n++;
+            }
         }
 
         log_remote("[BARCODE] RECORD d=%.2f v=%.3f grey=%d back=%d", d_cm, v, is_grey, B.back_cnt);

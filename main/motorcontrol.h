@@ -52,7 +52,7 @@ void motor_stop(void);
 // Updated function signature to accept compensation parameters and return results
 drive_result_t motor_forward();
 
-drive_result_t motor_forward_constant_5cmps(float distance_cm);
+drive_result_t scan_barcode(float distance_cm);
 // Control structures
 typedef struct
 {

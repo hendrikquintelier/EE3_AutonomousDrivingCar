@@ -377,10 +377,10 @@ drive_result_t motor_forward()
     float heading_comp = 0.0f;
     float dist_comp = 0.0f;
     /* Tunables ----------------------------------------------------------- */
-    const float RAMP_START_DUTY = 0.30f; /* soft-start 30 %             */
-    const float RAMP_STEP = 0.02f;       /* +2 % each loop              */
+    const float RAMP_START_DUTY = 0.20f; /* soft-start 30 %             */
+    const float RAMP_STEP = 0.01f;       /* +2 % each loop              */
     const float CRUISE_DUTY_MAX = MOTOR_SPEED;
-    const float RAMP_SPEED_CMPS = 10.0f; /* finish ramp when >10 cm/s   */
+    const float RAMP_SPEED_CMPS = 7.50f; /* finish ramp when >10 cm/s   */
     const unsigned LOOP_MS = 50;         /* control period              */
     const float STATIC_THRESHOLD = 0.1f; /* cm/s - considered static    */
     const unsigned STATIC_TIME_MS = 500; /* time to be static before exit */
@@ -401,17 +401,21 @@ drive_result_t motor_forward()
 
     float current_yaw = mpu_get_orientation().yaw;
 
-    float perpendicular_distance_right = fmod(u.right * cos(current_yaw - current_direction), 40.0f);
-    float perpendicular_distance_left = fmod(u.left * cos(current_yaw - current_direction), 40.0f);
+    float perpendicular_distance_right = fmod(u.right * cos(current_yaw - current_car.current_orientation), 40.0f);
+    float perpendicular_distance_left = fmod(u.left * cos(current_yaw - current_car.current_orientation), 40.0f);
 
-    if (perpendicular_distance_right < 10.0f && perpendicular_distance_left > 15.0f)
+    log_remote("Perpendicular distance right: %.1f, left: %.1f", perpendicular_distance_right, perpendicular_distance_left);
+
+    if (perpendicular_distance_right < 11.0f && perpendicular_distance_left > 11.0f)
     {
         heading_comp = -5.0f;
+        log_remote("Heading compensation: %.1f, turn to the left.°", heading_comp);
         target_dist = target_dist / cos(heading_comp * M_PI / 180.0f);
     }
-    else if (perpendicular_distance_right > 15.0f && perpendicular_distance_left < 10.0f)
+    else if (perpendicular_distance_right > 11.0f && perpendicular_distance_left < 11.0f)
     {
         heading_comp = 5.0f;
+        log_remote("Heading compensation: %.1f, turn to the right.°", heading_comp);
         target_dist = target_dist / cos(heading_comp * M_PI / 180.0f);
     }
 
@@ -458,7 +462,7 @@ drive_result_t motor_forward()
             else if ((now_ms - static_start_ms) >= STATIC_TIME_MS)
             {
                 /* Only exit if we've traveled at least 70% of the target distance */
-                if (dist >= 0.7f * target_dist)
+                if (dist >= 0.6f * target_dist)
                 {
                     // log_remote("[FWD] Car is static for %lu ms and traveled %.1f/%.1f cm (%.0f%%), exiting",
                     //           STATIC_TIME_MS, dist, target_dist, (dist/target_dist)*100.0f);
@@ -598,7 +602,7 @@ void motor_turn(Direction target)
     const float RAMP_START_DUTY = 0.15f, RAMP_MAX_DUTY = 0.65f, RAMP_STEP = 0.025f;
     const float MIN_ANG_VEL_DPS = 20.0f;
     const float COARSE_TO_PROP_DEG = 55.0f, BRAKE_ZONE_BEGIN_DEG = 17.5f;
-    const float MAX_PROP_DUTY = 0.60f, MAX_BRAKE_DUTY = 0.25f, OVERSHOOT_BRAKE_DUTY = 0.0f;
+    const float MAX_PROP_DUTY = 0.60f, MAX_BRAKE_DUTY = 0.25f, OVERSHOOT_BRAKE_DUTY = -0.2f;
     const unsigned STABLE_TIME_REQUIRED_MS = 300, LOOP_PERIOD_MS = 15;
     /* ----------------------------------------------------------------- */
 
@@ -793,7 +797,7 @@ void test_navigation(void)
 #define SPEED_I_MAX 0.30f
 #define CTRL_LOOP_MS 20 /* 50 Hz main loop                       */
 
-drive_result_t motor_forward_constant_5cmps(float distance_cm)
+drive_result_t scan_barcode(float distance_cm)
 {
     log_remote("[CONST_SPEED] Starting constant speed drive (target: %.1f cm/s, "
                "distance: %.1f cm)",

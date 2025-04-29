@@ -78,6 +78,9 @@ void existing_map_point_algorithm(MapPoint *existing_point)
 
     if (unexplored_paths > 0)
     {
+        log_remote("[NAVIGATE] Found %d unexplored paths at current MapPoint, turning to explore one\n", unexplored_paths);
+        turn_to_undiscovered_fundamental_path(existing_point);
+        move_forward();
     }
     else
     {

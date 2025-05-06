@@ -6,7 +6,6 @@
 #include "exploration_algorithm/algorithm_structs_PUBLIC/Path.h"
 #include "exploration_algorithm/direction.h"
 #include "motorcontrol.h"
-#include "exploration_algorithm/exploration.h"
 #include "exploration_algorithm/Dijkstra.h"
 #include "exploration_algorithm/navigate.h"
 #include "track_navigation.h"
@@ -23,9 +22,9 @@ void update_ultrasonic_readings(void)
     right_distance_ultrasonic = readings.right;
 
     // Set path detection flags based on 40cm threshold
-    ultrasonic_sensors[0] = (readings.front > 40.0f); // Front path
-    ultrasonic_sensors[1] = (readings.left > 40.0f);  // Left path
-    ultrasonic_sensors[2] = (readings.right > 40.0f); // Right path
+    ultrasonic_sensors[0] = (readings.front > 30.0f); // Front path
+    ultrasonic_sensors[1] = (readings.left > 35.0f);  // Left path
+    ultrasonic_sensors[2] = (readings.right > 35.0f); // Right path
 }
 
 int is_map_point()
@@ -41,6 +40,66 @@ int is_map_point()
 }
 
 /**
+ * @brief Handles navigation when revisiting an already discovered MapPoint.
+ *
+ * @param existing_point Pointer to the existing MapPoint.
+ */
+void existing_map_point_algorithm(MapPoint *existing_point)
+{
+    update_existing_mappoint(existing_point);
+
+    // Ensure a FundamentalPath exists between the former and current MapPoint
+    if (former_map_point)
+    {
+        update_latest_fundamental_path(existing_point, former_map_point);
+    }
+
+    // Check if we're at the start point in the wrong direction
+    if (existing_point->location.x == start.x &&
+        existing_point->location.y == start.y &&
+        current_car.current_orientation == get_opposite_direction(start_orientation))
+    {
+        log_remote("[NAVIGATE] At start point in wrong direction, turning to correct orientation\n");
+        turn_opposite_direction();
+        return;
+    }
+
+    // Check for unexplored paths at the current MapPoint
+    int unexplored_paths = 0;
+    for (int i = 0; i < existing_point->numberOfPaths; i++)
+    {
+        if (existing_point->paths[i].end == NULL)
+        {
+            unexplored_paths++;
+        }
+    }
+
+    check_mappoints_tbd();
+
+    if (unexplored_paths > 0)
+    {
+        log_remote("[NAVIGATE] Found %d unexplored paths at current MapPoint, turning to explore one\n", unexplored_paths);
+        turn_to_undiscovered_fundamental_path(existing_point);
+        move_forward();
+    }
+    else
+    {
+        // Find shortest path to the next unexplored MapPoint
+        Path *resulting_path = find_shortest_path_to_mappoint_tbd(existing_point);
+
+        if (resulting_path)
+        {
+            navigate_path(resulting_path);
+
+            // Free allocated memory
+            free(resulting_path->route);
+            free(resulting_path);
+        }
+    }
+    former_map_point = existing_point;
+}
+
+/**
  * @brief Decides the next move based on ultrasonic sensor readings.
  */
 void decide_next_move()
@@ -48,9 +107,9 @@ void decide_next_move()
     update_ultrasonic_readings();
 
     // Log ultrasonic values for debugging
-    printf("[ULTRASONIC] Front: %.1f cm (Path: %s)\n", front_distance_ultrasonic, ultrasonic_sensors[0] ? "CLEAR" : "BLOCKED");
-    printf("[ULTRASONIC] Left:  %.1f cm (Path: %s)\n", left_distance_ultrasonic, ultrasonic_sensors[1] ? "CLEAR" : "BLOCKED");
-    printf("[ULTRASONIC] Right: %.1f cm (Path: %s)\n", right_distance_ultrasonic, ultrasonic_sensors[2] ? "CLEAR" : "BLOCKED");
+    log_remote("[ULTRASONIC] Front: %.1f cm (Path: %s)\n", front_distance_ultrasonic, ultrasonic_sensors[0] ? "CLEAR" : "BLOCKED");
+    log_remote("[ULTRASONIC] Left:  %.1f cm (Path: %s)\n", left_distance_ultrasonic, ultrasonic_sensors[1] ? "CLEAR" : "BLOCKED");
+    log_remote("[ULTRASONIC] Right: %.1f cm (Path: %s)\n", right_distance_ultrasonic, ultrasonic_sensors[2] ? "CLEAR" : "BLOCKED");
 
     if (ultrasonic_sensors[0])
     {
@@ -74,9 +133,49 @@ void decide_next_move()
     }
     else
     {
-        printf("[DECISION] All paths blocked - turning opposite direction\n");
-        turn_opposite_direction();
-        move_forward();
+        printf("[DECISION] All paths blocked - dead end detected\n");
+
+        // First check if a map point already exists at this location
+        MapPoint *existing_point = check_map_point_already_exists();
+        if (existing_point)
+        {
+            log_remote("Found existing MapPoint at dead end location\n");
+            existing_map_point_algorithm(existing_point);
+            return;
+        }
+        else
+        {
+            // Create a new MapPoint at the dead end
+            MapPoint *dead_end_point = malloc(sizeof(MapPoint));
+            if (!dead_end_point)
+            {
+                log_remote("Memory allocation failed for dead end MapPoint");
+                exit(EXIT_FAILURE);
+            }
+
+            // Set location based on the car's current position
+            Location location = {current_car.current_location.x, current_car.current_location.y};
+
+            // For a dead end, we only want one path - the one back to where we came from
+            bool paths[3] = {false, false, false};
+            Direction back_direction = get_opposite_direction(current_car.current_orientation);
+
+            // Initialize new MapPoint with the path back
+            initialize_map_point(dead_end_point, location, paths);
+            log_remote("Dead end MapPoint created\n");
+
+            // Link with the previous MapPoint if it exists
+            if (former_map_point)
+            {
+                update_latest_fundamental_path(dead_end_point, former_map_point);
+                former_map_point = dead_end_point;
+            }
+
+            // Update the former MapPoint tracker
+            former_map_point = dead_end_point;
+            log_all_map_points();
+            existing_map_point_algorithm(dead_end_point);
+        }
     }
 }
 
@@ -113,53 +212,6 @@ MapPoint *select_next_mappoint()
     return NULL;
 }
 
-/**
- * @brief Handles navigation when revisiting an already discovered MapPoint.
- *
- * @param existing_point Pointer to the existing MapPoint.
- */
-void existing_map_point_algorithm(MapPoint *existing_point)
-{
-    update_existing_mappoint(existing_point);
-
-    // Ensure a FundamentalPath exists between the former and current MapPoint
-    if (former_map_point)
-    {
-        update_latest_fundamental_path(existing_point, former_map_point);
-    }
-
-    // Check for unexplored paths at the current MapPoint
-    int unexplored_paths = 0;
-    for (int i = 0; i < existing_point->numberOfPaths; i++)
-    {
-        if (existing_point->paths[i].end == NULL)
-        {
-            unexplored_paths++;
-        }
-    }
-
-    check_mappoints_tbd();
-
-    if (unexplored_paths > 0)
-    {
-        decide_next_move();
-    }
-    else
-    {
-        // Find shortest path to the next unexplored MapPoint
-        Path *resulting_path = find_shortest_path_to_mappoint_tbd(existing_point);
-
-        if (resulting_path)
-        {
-            navigate_path(resulting_path);
-
-            // Free allocated memory
-            free(resulting_path->route);
-            free(resulting_path);
-        }
-    }
-}
-
 void start_exploration()
 {
     initialize_globals();
@@ -181,7 +233,6 @@ void start_exploration()
             if (existing_point)
             {
                 log_remote("Existing MapPoint found:\n");
-                log_all_map_points();
                 existing_map_point_algorithm(existing_point);
             }
             else
@@ -199,7 +250,6 @@ void start_exploration()
                 // Initialize new MapPoint with sensor data
                 initialize_map_point(new_map_point, location, ultrasonic_sensors);
                 log_remote("New MapPoint created:\n");
-                log_all_map_points();
 
                 // Link with the previous MapPoint if it exists
                 if (former_map_point)
@@ -210,6 +260,7 @@ void start_exploration()
                 // Update the former MapPoint tracker
                 former_map_point = new_map_point;
             }
+            log_all_map_points();
         }
         // Decide the next movement
         decide_next_move();

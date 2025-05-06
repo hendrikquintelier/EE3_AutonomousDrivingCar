@@ -14,7 +14,8 @@
 #include "esp_mac.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-
+#include "globals.h"
+#include "barcode.h"
 #define BLOCK_SIZE 40.0f
 
 // ============================================================================
@@ -376,10 +377,10 @@ drive_result_t motor_forward()
     float heading_comp = 0.0f;
     float dist_comp = 0.0f;
     /* Tunables ----------------------------------------------------------- */
-    const float RAMP_START_DUTY = 0.30f; /* soft-start 30 %             */
-    const float RAMP_STEP = 0.02f;       /* +2 % each loop              */
+    const float RAMP_START_DUTY = 0.20f; /* soft-start 30 %             */
+    const float RAMP_STEP = 0.01f;       /* +2 % each loop              */
     const float CRUISE_DUTY_MAX = MOTOR_SPEED;
-    const float RAMP_SPEED_CMPS = 10.0f; /* finish ramp when >10 cm/s   */
+    const float RAMP_SPEED_CMPS = 7.50f; /* finish ramp when >10 cm/s   */
     const unsigned LOOP_MS = 50;         /* control period              */
     const float STATIC_THRESHOLD = 0.1f; /* cm/s - considered static    */
     const unsigned STATIC_TIME_MS = 500; /* time to be static before exit */
@@ -389,27 +390,32 @@ drive_result_t motor_forward()
     ultrasonic_readings_t u = ultrasonic_get_all();
     float front = (u.front < 1.0f || u.front > 400.0f) ? 0.0f : u.front;
 
-    float raw_off = fmodf(front, BLOCK_SIZE) - 10.0f; /* −10 … +30 cm      */
-    if (raw_off > 8.0f)
-        raw_off = 8.0f;
-    if (raw_off < -8.0f)
-        raw_off = -8.0f;
+    const float MAX_DISTANCE_OFFSET = 8.0f;
+    float raw_off = fmodf(front, BLOCK_SIZE) - 13.0f; /* −10 … +30 cm      */
+    if (raw_off > MAX_DISTANCE_OFFSET)
+        raw_off = MAX_DISTANCE_OFFSET;
+    if (raw_off < -MAX_DISTANCE_OFFSET)
+        raw_off = -MAX_DISTANCE_OFFSET;
 
     float target_dist = BLOCK_SIZE + raw_off - dist_comp;
 
     float current_yaw = mpu_get_orientation().yaw;
 
-    float perpendicular_distance_right = fmod(u.right * cos(current_yaw - current_direction), 40.0f);
-    float perpendicular_distance_left = fmod(u.left * cos(current_yaw - current_direction), 40.0f);
+    float perpendicular_distance_right = fmod(u.right * cos(current_yaw - current_car.current_orientation), 40.0f);
+    float perpendicular_distance_left = fmod(u.left * cos(current_yaw - current_car.current_orientation), 40.0f);
 
-    if (perpendicular_distance_right < 10.0f && perpendicular_distance_left > 15.0f)
+    log_remote("Perpendicular distance right: %.1f, left: %.1f", perpendicular_distance_right, perpendicular_distance_left);
+
+    if (perpendicular_distance_right < 11.0f && perpendicular_distance_left > 11.0f)
     {
         heading_comp = -5.0f;
+        log_remote("Heading compensation: %.1f, turn to the left.°", heading_comp);
         target_dist = target_dist / cos(heading_comp * M_PI / 180.0f);
     }
-    else if (perpendicular_distance_right > 15.0f && perpendicular_distance_left < 10.0f)
+    else if (perpendicular_distance_right > 11.0f && perpendicular_distance_left < 11.0f)
     {
         heading_comp = 5.0f;
+        log_remote("Heading compensation: %.1f, turn to the right.°", heading_comp);
         target_dist = target_dist / cos(heading_comp * M_PI / 180.0f);
     }
 
@@ -456,7 +462,7 @@ drive_result_t motor_forward()
             else if ((now_ms - static_start_ms) >= STATIC_TIME_MS)
             {
                 /* Only exit if we've traveled at least 70% of the target distance */
-                if (dist >= 0.7f * target_dist)
+                if (dist >= 0.6f * target_dist)
                 {
                     // log_remote("[FWD] Car is static for %lu ms and traveled %.1f/%.1f cm (%.0f%%), exiting",
                     //           STATIC_TIME_MS, dist, target_dist, (dist/target_dist)*100.0f);
@@ -477,7 +483,7 @@ drive_result_t motor_forward()
 
         /* dynamic thresholds */
         const float DECEL_START = fmaxf(0.40f * target_dist, 12.0f); /* ≥12 cm */
-        const float BRAKE_START = 1.0f;                              /* fixed */
+        const float BRAKE_START = 3.0f;                              /* fixed */
 
         /* a) ramp-up until >10 cm/s */
         if (speed < RAMP_SPEED_CMPS && duty_ratio < CRUISE_DUTY_MAX)
@@ -595,12 +601,13 @@ void motor_turn(Direction target)
     const float LEFT_FACTOR = 1.0f;
     const float RAMP_START_DUTY = 0.15f, RAMP_MAX_DUTY = 0.65f, RAMP_STEP = 0.025f;
     const float MIN_ANG_VEL_DPS = 20.0f;
-    const float COARSE_TO_PROP_DEG = 50.0f, BRAKE_ZONE_BEGIN_DEG = 15.0f;
-    const float MAX_PROP_DUTY = 0.60f, MAX_BRAKE_DUTY = 0.25f, OVERSHOOT_BRAKE_DUTY = 0.375f;
+    const float COARSE_TO_PROP_DEG = 55.0f, BRAKE_ZONE_BEGIN_DEG = 17.5f;
+    const float MAX_PROP_DUTY = 0.60f, MAX_BRAKE_DUTY = 0.25f, OVERSHOOT_BRAKE_DUTY = -0.2f;
     const unsigned STABLE_TIME_REQUIRED_MS = 300, LOOP_PERIOD_MS = 15;
     /* ----------------------------------------------------------------- */
 
     current_direction = target;
+    current_car.current_orientation = target;
     float desired_heading = normalize_angle((float)target * 90.0f + heading_offset);
     printf("[TURN_DEBUG] Desired heading: %.1f°\n", desired_heading);
 
@@ -694,7 +701,7 @@ void motor_turn(Direction target)
         else
         {
             float s = (BRAKE_ZONE_BEGIN_DEG - abs_err) / BRAKE_ZONE_BEGIN_DEG;
-            cmd_ratio = -MAX_BRAKE_DUTY * s * dir_sign;
+            cmd_ratio = MAX_BRAKE_DUTY * s * dir_sign;
             printf("[TURN_DEBUG] Braking: s=%.3f, cmd_ratio=%.3f\n", s, cmd_ratio);
         }
 
@@ -768,4 +775,172 @@ void test_navigation(void)
         // Move to next direction in sequence
         current_direction_index = (current_direction_index + 1) % NUM_DIRECTIONS;
     }
+}
+
+/******************************************************************************
+ *  Drive forward at ≈ 5 cm · s-¹ (closed-loop)                                *
+ *  ───────────────────────────────────────────────────────────────────────────*
+ *  • kick-off ramp : 50 % → 65 % until the wheels turn (≤ 300 ms)             *
+ *  • afterwards    : PID keeps speed close to TARGET_SPEED_CMPS               *
+ *  • heading PID   : uses existing yaw-PID helpers                            *
+ *  • PWM limits    : 10 % … 80 %                                              *
+ *  • verbose logs  : identical tag “[CONST_SPEED] …” as before                *
+ ******************************************************************************/
+
+#define TARGET_SPEED_CMPS 10.0f /*  10 cm/s                               */
+#define BASE_DUTY 0.50f         /* 50 %  – starting point                */
+#define DUTY_MIN 0.10f          /* 10 %  – don’t stall a moving wheel    */
+#define DUTY_MAX 0.80f          /* 80 %  – hardware safe-limit           */
+#define SPEED_KP 0.0025f
+#define SPEED_KI 0.00015f
+#define SPEED_KD 0.00005f
+#define SPEED_I_MAX 0.30f
+#define CTRL_LOOP_MS 20 /* 50 Hz main loop                       */
+
+drive_result_t scan_barcode(float distance_cm)
+{
+    log_remote("[CONST_SPEED] Starting constant speed drive (target: %.1f cm/s, "
+               "distance: %.1f cm)",
+               TARGET_SPEED_CMPS, distance_cm);
+    barcode_reset();
+
+    /* --------------------------------------------------------------------- */
+    /*  house-keeping                                                        */
+    /* --------------------------------------------------------------------- */
+    drive_result_t result;
+    encoder_reset();
+    mpu_data_t ori = mpu_get_orientation();
+    const float base_ya = (float)current_direction * 90.0f;
+    const float tgt_yaw = normalize_angle(base_ya);
+
+    log_remote("[CONST_SPEED] Initial heading %.1f°, target heading %.1f°",
+               ori.yaw, tgt_yaw);
+
+    /* --------------------------------------------------------------------- */
+    /*  speed-PID state                                                      */
+    /* --------------------------------------------------------------------- */
+    float speed_i = 0.0f;
+    float last_speed_err = 0.0f;
+    float last_distance_cm = 0.0f;
+
+    unsigned long t0_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    unsigned long last_ms = t0_ms;
+
+    yaw_integral = 0.0f;
+    last_yaw_error = 0.0f;
+    last_pid_update = last_ms;
+
+    /* --------------------------------------------------------------------- */
+    /*  kick-off : ramp 50 % → 65 % until the encoders register motion       */
+    /* --------------------------------------------------------------------- */
+    const float KICK_MAX = 0.65f;
+    const int KICK_STEPS = 12; /* 12×25 ms ≈ 300 ms */
+    bool moving = false;
+
+    for (int i = 0; i < KICK_STEPS && !moving; ++i)
+    {
+        float duty = BASE_DUTY + (KICK_MAX - BASE_DUTY) * (i + 1) / (float)KICK_STEPS;
+        set_motor_direction(true);
+        set_motor_speed((long)(duty * PWM_MAX_DUTY), (long)(duty * PWM_MAX_DUTY));
+
+        vTaskDelay(pdMS_TO_TICKS(CTRL_LOOP_MS));
+        moving = (encoder_get_distance() > 0.5f); /* >½ cm ⇒ wheels turned */
+    }
+
+    log_remote("[CONST_SPEED] Motors set FORWARD (BASE_DUTY 50 %%)");
+
+    /* --------------------------------------------------------------------- */
+    /*  main control loop                                                    */
+    /* --------------------------------------------------------------------- */
+    while (true)
+    {
+
+        /* time delta ------------------------------------------------------ */
+        unsigned long now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        float dt = (now_ms - last_ms) / 1000.0f;
+        if (dt < 0.001f)
+            dt = 0.001f; /* cap to avoid div/0     */
+
+        /* odometry & speed ------------------------------------------------ */
+        float dist_cm = encoder_get_distance();
+        float d_dist = dist_cm - last_distance_cm;
+        float speed_cps = d_dist / dt; /* cm / s                */
+
+        /* heading --------------------------------------------------------- */
+        ori = mpu_get_orientation();
+        float yaw_err = calculate_yaw_error(tgt_yaw, ori.yaw);
+        float yaw_corr = calculate_heading_correction(yaw_err, dt);
+
+        barcode_update(dist_cm, ori.ir_voltage);
+        /* distance goal reached ? ---------------------------------------- */
+        if (distance_cm > 0.0f && dist_cm >= distance_cm)
+        {
+            log_remote("[CONST_SPEED] Target distance reached: %.1f/%.1f cm",
+                       dist_cm, distance_cm);
+            break;
+        }
+
+        /* speed-PID ------------------------------------------------------- */
+        float speed_err = TARGET_SPEED_CMPS - speed_cps;
+        speed_i += speed_err * dt;
+        if (speed_i > SPEED_I_MAX)
+            speed_i = SPEED_I_MAX;
+        if (speed_i < -SPEED_I_MAX)
+            speed_i = -SPEED_I_MAX;
+
+        float speed_d = (speed_err - last_speed_err) / dt;
+        last_speed_err = speed_err;
+
+        float duty_cmd = BASE_DUTY +
+                         SPEED_KP * speed_err +
+                         SPEED_KI * speed_i +
+                         SPEED_KD * speed_d;
+
+        /* clamp absolute duty -------------------------------------------- */
+        if (duty_cmd > DUTY_MAX)
+            duty_cmd = DUTY_MAX;
+        if (duty_cmd < DUTY_MIN)
+            duty_cmd = DUTY_MIN;
+
+        long duty_left = (long)((duty_cmd - yaw_corr) * PWM_MAX_DUTY + 0.5f);
+        long duty_right = (long)((duty_cmd + yaw_corr) * PWM_MAX_DUTY + 0.5f);
+        set_motor_speed(duty_left, duty_right);
+
+        float t = (now_ms - t0_ms) / 1000.0f;
+        log_remote("[CONST_SPEED] t=%.2fs v=%.1fcm/s duty=%02.0f%% "
+                   "yaw=%.1f° err=%.1f° dist=%.1f/%.1fcm",
+                   t, speed_cps, duty_cmd * 100.0f,
+                   ori.yaw, yaw_err, dist_cm, distance_cm);
+        log_remote("[CONST_SPEED] IR voltage: %.2f V", ori.ir_voltage);
+
+        /* book-keeping ---------------------------------------------------- */
+        last_ms = now_ms;
+        last_distance_cm = dist_cm;
+        vTaskDelay(pdMS_TO_TICKS(CTRL_LOOP_MS));
+    }
+
+    /* --------------------------------------------------------------------- */
+    /*  stop & report                                                       */
+    /* --------------------------------------------------------------------- */
+    motor_stop();
+
+    log_remote("[CONST_SPEED] Motors stopped, waiting for complete stop");
+    wait_for_stop(250, &result, tgt_yaw);
+    log_remote("[CONST_SPEED] Drive complete – final heading error %.1f°, "
+               "front %.1f cm",
+               result.heading, result.ultrasonic.front);
+
+    /* after motor_stop() / wait_for_stop() */
+    if (barcode_is_complete())
+    {
+        const char *bits = barcode_get_bits(); /* logs details too        */
+        log_remote("[CONST_SPEED] Scanned barcode: %s", bits);
+        bc_finish();
+    }
+    else
+    {
+        log_remote("[CONST_SPEED] No complete barcode detected");
+        bc_finish();
+    }
+    return result;
 }

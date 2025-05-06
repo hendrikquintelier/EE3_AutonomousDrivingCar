@@ -25,9 +25,9 @@
 #define MOTOR_MIN_TIME 300   // Minimum time for a turn
 
 // Timeout and tolerance constants
-#define TURN_TIMEOUT_MS 5000     // Maximum time allowed for a turn (5 seconds)
-#define MOTOR_TIMEOUT_MS 5000    // Maximum time allowed for motor operations (5 seconds)
-#define MOTOR_TOLERANCE_DEG 6.0f // Tolerance for motor operations in degrees
+#define TURN_TIMEOUT_MS 5000      // Maximum time allowed for a turn (5 seconds)
+#define MOTOR_TIMEOUT_MS 5000     // Maximum time allowed for motor operations (5 seconds)
+#define MOTOR_TOLERANCE_DEG 45.0f // Tolerance for motor operations in degrees
 
 // Duty cycle limits
 #define MAX_DUTY_RATIO 0.95f // Maximum duty cycle ratio (95%)
@@ -52,6 +52,7 @@ void motor_stop(void);
 // Updated function signature to accept compensation parameters and return results
 drive_result_t motor_forward();
 
+drive_result_t scan_barcode(float distance_cm);
 // Control structures
 typedef struct
 {

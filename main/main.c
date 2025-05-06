@@ -22,7 +22,7 @@ void app_main(void)
 
     // Wait for everything to stabilize
     vTaskDelay(pdMS_TO_TICKS(2000));
-    start_exploration();
+    scan_barcode(100);
 }
 
 void follow_single_track()

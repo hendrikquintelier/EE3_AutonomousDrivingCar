@@ -14,6 +14,7 @@ idf_component_register(
          "wifi_logger.c"
          "main_exploration.c"
          "track_navigation.c"
+         "barcode.c"
          
     INCLUDE_DIRS "."
                  "exploration_algorithm"

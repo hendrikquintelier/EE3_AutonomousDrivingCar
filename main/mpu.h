@@ -14,6 +14,7 @@ extern "C"
         float yaw;
         float pitch;
         float roll;
+        float ir_voltage;
     } mpu_data_t;
 
     /**
@@ -40,6 +41,8 @@ extern "C"
      * @brief Resets the movement tracking (position and velocity)
      */
     void mpu_reset_movement(void);
+
+    static float read_ir_voltage(void);
 
 #ifdef __cplusplus
 }
